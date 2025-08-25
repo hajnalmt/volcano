@@ -124,6 +124,7 @@ kubernetes.tar.gz
 *.pyc
 
 # e2e log files
+volcano-e2e-logs/
 *.log
 
 # test coverage file
