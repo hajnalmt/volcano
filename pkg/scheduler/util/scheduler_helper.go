@@ -291,16 +291,19 @@ func GetMinInt(vals ...int) int {
 }
 
 // ConvertRes2ResList convert resource type from api.Resource in scheduler to v1.ResourceList in yaml
-func ConvertRes2ResList(res *api.Resource) v1.ResourceList {
+// knownScalarResources: all scalar resource names that should be present in the output, even if zero
+func ConvertRes2ResList(res *api.Resource, knownScalarResources []string) v1.ResourceList {
 	var rl = v1.ResourceList{}
 	rl[v1.ResourceCPU] = *resource.NewMilliQuantity(int64(res.MilliCPU), resource.DecimalSI)
 	rl[v1.ResourceMemory] = *resource.NewQuantity(int64(res.Memory), resource.BinarySI)
-	for resourceName, f := range res.ScalarResources {
-		if resourceName == v1.ResourcePods {
-			rl[resourceName] = *resource.NewQuantity(int64(f), resource.DecimalSI)
+	for _, resourceName := range knownScalarResources {
+		key := v1.ResourceName(resourceName)
+		f := res.ScalarResources[key]
+		if key == v1.ResourcePods {
+			rl[key] = *resource.NewQuantity(int64(f), resource.DecimalSI)
 			continue
 		}
-		rl[resourceName] = *resource.NewMilliQuantity(int64(f), resource.DecimalSI)
+		rl[key] = *resource.NewMilliQuantity(int64(f), resource.DecimalSI)
 	}
 	return rl
 }

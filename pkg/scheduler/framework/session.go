@@ -225,6 +225,8 @@ func openSession(cache cache.Cache) *Session {
 	klog.V(3).Infof("Open Session %v with <%d> Job and <%d> Queues",
 		ssn.UID, len(ssn.Jobs), len(ssn.Queues))
 
+	klog.V(5).Infof("Session %v operates with TotalResource: <%s>, TotalDeserved: <%s>, TotalGuaranteed: <%s>",
+		ssn.UID, ssn.TotalResource.String(), ssn.TotalDeserved.String(), ssn.TotalGuarantee.String())
 	return ssn
 }
 
@@ -277,8 +279,29 @@ func updateQueueStatus(ssn *Session) {
 
 	// update queue status
 	for queueID := range ssn.Queues {
+		queue := ssn.Queues[queueID].Queue
+		// Collect all known scalar resources from capability, deserved, and allocated
+		knownScalarSet := make(map[string]struct{})
+		for k := range queue.Spec.Capability {
+			knownScalarSet[string(k)] = struct{}{}
+		}
+		for k := range queue.Spec.Deserved {
+			knownScalarSet[string(k)] = struct{}{}
+		}
+		for k := range queue.Status.Allocated {
+			knownScalarSet[string(k)] = struct{}{}
+		}
+		// Remove CPU and Memory, which are handled separately
+		delete(knownScalarSet, string(v1.ResourceCPU))
+		delete(knownScalarSet, string(v1.ResourceMemory))
+		// Build slice for ConvertRes2ResList
+		knownScalarResources := make([]string, 0, len(knownScalarSet))
+		for k := range knownScalarSet {
+			knownScalarResources = append(knownScalarResources, k)
+		}
 		// convert api.Resource to v1.ResourceList
-		var queueStatus = util.ConvertRes2ResList(allocatedResources[queueID]).DeepCopy()
+		var queueStatus = util.ConvertRes2ResList(allocatedResources[queueID], knownScalarResources).DeepCopy()
+		klog.V(5).Infof("Queue <%s> allocated resource: <%v>", queueID, queueStatus)
 		if queueID == rootQueue {
 			updateRootQueueResources(ssn, queueStatus)
 			continue
@@ -301,8 +324,31 @@ func updateQueueStatus(ssn *Session) {
 // updateRootQueueResources updates the deserved/guaranteed resource and allocated resource of the root queue
 func updateRootQueueResources(ssn *Session, allocated v1.ResourceList) {
 	rootQueue := api.QueueID("root")
-	totalDeserved := util.ConvertRes2ResList(ssn.TotalDeserved).DeepCopy()
-	totalGuarantee := util.ConvertRes2ResList(ssn.TotalGuarantee).DeepCopy()
+	// Collect all known scalar resources from TotalDeserved, TotalGuarantee, and allocated
+	knownScalarSet := make(map[string]struct{})
+	for k := range ssn.TotalDeserved.ScalarResources {
+		knownScalarSet[string(k)] = struct{}{}
+	}
+	for k := range ssn.TotalGuarantee.ScalarResources {
+		knownScalarSet[string(k)] = struct{}{}
+	}
+	for k := range allocated {
+		knownScalarSet[string(k)] = struct{}{}
+	}
+	delete(knownScalarSet, string(v1.ResourceCPU))
+	delete(knownScalarSet, string(v1.ResourceMemory))
+	knownScalarResources := make([]string, 0, len(knownScalarSet))
+	for k := range knownScalarSet {
+		knownScalarResources = append(knownScalarResources, k)
+	}
+
+	totalDeserved := util.ConvertRes2ResList(ssn.TotalDeserved, knownScalarResources).DeepCopy()
+	totalGuarantee := util.ConvertRes2ResList(ssn.TotalGuarantee, knownScalarResources).DeepCopy()
+
+	klog.V(5).Infof("ssn.Queues[rootQueue].Queue.Spec.Deserved: %v, totalDeserved: %v, ssn.Queues[rootQueue].Queue.Spec.Guarantee.Resource: %v, totalGuarantee: %v, ssn.Queues[rootQueue].Queue.Status.Allocated: %v, allocated: %v",
+		ssn.Queues[rootQueue].Queue.Spec.Deserved, totalDeserved,
+		ssn.Queues[rootQueue].Queue.Spec.Guarantee.Resource, totalGuarantee,
+		ssn.Queues[rootQueue].Queue.Status.Allocated, allocated)
 
 	if equality.Semantic.DeepEqual(ssn.Queues[rootQueue].Queue.Spec.Deserved, totalDeserved) &&
 		equality.Semantic.DeepEqual(ssn.Queues[rootQueue].Queue.Spec.Guarantee.Resource, totalGuarantee) &&
@@ -344,6 +390,9 @@ func closeSession(ssn *Session) {
 	ju.UpdateAll()
 
 	updateQueueStatus(ssn)
+
+	klog.V(5).Infof("Session %v operated with TotalResource: <%s>, TotalDeserved: <%s>, TotalGuaranteed: <%s>",
+		ssn.UID, ssn.TotalResource.String(), ssn.TotalDeserved.String(), ssn.TotalGuarantee.String())
 
 	ssn.Jobs = nil
 	ssn.Nodes = nil
