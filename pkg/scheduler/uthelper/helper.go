@@ -322,6 +322,7 @@ func (test *TestCommonStruct) CheckPipelined(caseIndex int) error {
 	ssn := test.ssn
 	for jobID, nodes := range test.ExpectPipeLined {
 		job := ssn.Jobs[api.JobID(jobID)]
+		fmt.Printf("CheckPipelined: job <%v> in session <%v>", jobID, ssn)
 		if job == nil {
 			return fmt.Errorf("case %d(%s) check pipeline, job <%v> doesn't exist in session", caseIndex, test.Name, jobID)
 		}
