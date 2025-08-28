@@ -139,6 +139,21 @@ func Test_capacityPlugin_OnSessionOpenWithoutHierarchy(t *testing.T) {
 	queue10 := util.BuildQueueWithResourcesQuantity("q10", api.BuildResourceList("2", "2Gi"), api.BuildResourceList("4", "4Gi"))
 	queue11 := util.BuildQueueWithResourcesQuantity("q11", api.BuildResourceList("0", "0Gi"), api.BuildResourceList("2", "2Gi"))
 
+	// case6: only scalar resources in queues test
+	// pod
+	p19 := util.BuildPod("ns1", "p19", "n3", corev1.PodRunning, api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), "pg19", map[string]string{schedulingv1beta1.PodPreemptable: "false"}, make(map[string]string))
+	p20 := util.BuildPod("ns1", "p20", "n3", corev1.PodRunning, api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), "pg20", make(map[string]string), make(map[string]string))
+	p21 := util.BuildPod("ns1", "p21", "", corev1.PodPending, api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), "pg21", make(map[string]string), make(map[string]string))
+
+	// podgroup
+	pg19 := util.BuildPodGroup("pg19", "ns1", "queue12", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg20 := util.BuildPodGroup("pg20", "ns1", "queue12", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg21 := util.BuildPodGroup("pg21", "ns1", "queue13", 1, nil, schedulingv1beta1.PodGroupPending)
+
+	// queue
+	queue12 := util.BuildQueueWithResourcesQuantity("queue12", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "10"}}...))
+	queue13 := util.BuildQueueWithResourcesQuantity("queue13", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), nil)
+
 	tests := []uthelper.TestCommonStruct{
 		{
 			Name:      "case0: Pod allocatable when queue has not exceed capability",
@@ -197,7 +212,6 @@ func Test_capacityPlugin_OnSessionOpenWithoutHierarchy(t *testing.T) {
 			ExpectBindMap: map[string]string{
 				"ns1/p15": "n6",
 			},
-
 			ExpectBindsNum: 1,
 		},
 		{
@@ -210,6 +224,19 @@ func Test_capacityPlugin_OnSessionOpenWithoutHierarchy(t *testing.T) {
 			ExpectPipeLined: map[string][]string{},
 			ExpectEvicted:   []string{},
 			ExpectEvictNum:  0,
+		},
+		{
+			Name:      "case6: Can reclaim when only scalar resources in queues",
+			Plugins:   plugins,
+			Pods:      []*corev1.Pod{p19, p20, p21},
+			Nodes:     []*corev1.Node{n3},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg19, pg20, pg21},
+			Queues:    []*schedulingv1beta1.Queue{queue12, queue13},
+			ExpectPipeLined: map[string][]string{
+				"ns1/pg21": {"n3"},
+			},
+			ExpectEvicted:  []string{"ns1/p20"},
+			ExpectEvictNum: 1,
 		},
 	}
 
@@ -486,6 +513,8 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 	p14 := util.BuildPod("ns1", "p14", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/gpu", Value: "4"}}...), "pg14", make(map[string]string), map[string]string{})
 	p15 := util.BuildPod("ns1", "p15", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/gpu", Value: "4"}}...), "pg15", make(map[string]string), map[string]string{})
 
+	// resources for test case 12
+
 	tests := []uthelper.TestCommonStruct{
 		{
 			Name:      "case0: Pod allocatable when queue is leaf queue",
@@ -617,6 +646,35 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 			},
 			ExpectBindsNum: 2,
 		},
+		{
+			Name:    "case12: Can reclaim when only scalar resources in queues (hierarchy)",
+			Plugins: plugins,
+			// Setup: Two running pods in queue_h_scalar, one pending pod in queue_h_scalar2. All only use scalar resource (nvidia.com/A100).
+			// Expect: pending pod can be scheduled by reclaiming a running pod from the same node.
+			Pods: []*corev1.Pod{
+				util.BuildPod("ns1", "h_p1", "n2", corev1.PodRunning, api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), "h_pg1", map[string]string{schedulingv1beta1.PodPreemptable: "false"}, make(map[string]string)),
+				util.BuildPod("ns1", "h_p2", "n2", corev1.PodRunning, api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), "h_pg2", make(map[string]string), make(map[string]string)),
+				util.BuildPod("ns1", "h_p3", "", corev1.PodPending, api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), "h_pg3", make(map[string]string), make(map[string]string)),
+			},
+			Nodes: []*corev1.Node{
+				util.BuildNode("n2", api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "10"}, {Name: "pods", Value: "10"}}...), map[string]string{}),
+			},
+			PodGroups: []*schedulingv1beta1.PodGroup{
+				util.BuildPodGroup("h_pg1", "ns1", "queue_h_scalar", 1, nil, schedulingv1beta1.PodGroupRunning),
+				util.BuildPodGroup("h_pg2", "ns1", "queue_h_scalar", 1, nil, schedulingv1beta1.PodGroupRunning),
+				util.BuildPodGroup("h_pg3", "ns1", "queue_h_scalar2", 1, nil, schedulingv1beta1.PodGroupPending),
+			},
+			Queues: []*schedulingv1beta1.Queue{
+				buildQueueWithParents("root", "", nil, nil),
+				buildQueueWithParents("queue_h_scalar", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "10"}}...)),
+				buildQueueWithParents("queue_h_scalar2", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/A100", Value: "5"}}...), nil),
+			},
+			ExpectPipeLined: map[string][]string{
+				"ns1/h_pg3": {"n2"},
+			},
+			ExpectEvicted:  []string{"ns1/h_p2"},
+			ExpectEvictNum: 1,
+		},
 	}
 
 	tiers := []conf.Tier{
@@ -644,10 +702,12 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 	}
 	for i, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
+			t.Logf("Running test: %s", test.Name)
 			test.RegisterSession(tiers, nil)
 			defer test.Close()
 			test.Run(actions)
 			if err := test.CheckAll(i); err != nil {
+				t.Logf("CheckAll failed: %v", err)
 				t.Fatal(err)
 			}
 		})
