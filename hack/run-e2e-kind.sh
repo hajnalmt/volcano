@@ -66,10 +66,12 @@ status:
     cpu: "${KWOK_NODE_CPU}"
     memory: "${KWOK_NODE_MEMORY}"
     pods: "110"
+    nvidia.com/A100: "2"
   allocatable:
     cpu: "${KWOK_NODE_CPU}"
     memory: "${KWOK_NODE_MEMORY}"
     pods: "110"
+    nvidia.com/A100: "2"
 EOF
 }
 
@@ -239,6 +241,12 @@ case ${E2E_TYPE} in
     install-kwok-nodes 8
     echo "Running hypernode e2e suite..."
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/hypernode/
+    ;;
+"MATE")
+    echo "Creating 2 kwok nodes for mate e2e test"
+    install-kwok-nodes 2
+    echo "Running mate e2e suite..."
+    # KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/mate/
     ;;
 esac
 
