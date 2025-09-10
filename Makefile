@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-BIN_DIR=_output/bin
-RELEASE_DIR=_output/release
+OUTPUT_DIR=${PWD}/_output
+BIN_DIR=${OUTPUT_DIR}/bin
+RELEASE_DIR=${OUTPUT_DIR}/release
 REPO_PATH=volcano.sh/volcano
 IMAGE_PREFIX=volcanosh
 CRD_OPTIONS ?= "crd:crdVersions=v1,generateEmbeddedObjectMeta=true"
@@ -63,6 +64,7 @@ DOCKER_PLATFORMS ?= "linux/${GOARCH}"
 GOOS ?= linux
 
 include Makefile.def
+include hack/tilt/Makefile
 
 .EXPORT_ALL_VARIABLES:
 
@@ -169,7 +171,7 @@ release: images generate-yaml
 	./hack/publish.sh
 
 clean:
-	rm -rf _output/
+	rm -rf ${OUTPUT_DIR}/
 	rm -f *.log
 
 verify:
