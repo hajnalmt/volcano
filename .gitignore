@@ -104,6 +104,9 @@ network_closure.sh
 # Downloaded Kubernetes binary release
 /kubernetes/
 
+# k3d cluster data
+/k3d-data
+
 # direnv .envrc files
 .envrc
 
