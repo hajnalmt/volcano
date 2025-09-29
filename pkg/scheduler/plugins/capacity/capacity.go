@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -52,6 +53,8 @@ type capacityPlugin struct {
 	queueOpts map[api.QueueID]*queueAttr
 	// Arguments given for the plugin
 	pluginArguments framework.Arguments
+	// Ignore these dimensions during reclaiming
+	ignoreReclaimDimensions api.ResourceNameList
 }
 
 type queueAttr struct {
@@ -94,6 +97,24 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	klog.V(4).Infof("The total resource is <%v>", cp.totalResource)
 
+	// Validate ignoreReclaimDimensions against totalResource
+	validResources := map[string]struct{}{}
+	for _, rn := range cp.totalResource.ResourceNames() {
+		validResources[strings.ToLower(string(rn))] = struct{}{}
+	}
+
+	if val, ok := cp.pluginArguments["IgnoreReclaimDimensions"]; ok {
+		if dims, ok := val.(string); ok {
+			for _, dim := range util.SplitAndTrim(dims, ",") {
+				if _, ok := validResources[strings.ToLower(dim)]; !ok {
+					klog.Warningf("IgnoreReclaimDimensions: resource '%s' not found in totalResource, will be ignored", dim)
+					continue
+				}
+				cp.ignoreReclaimDimensions = append(cp.ignoreReclaimDimensions, v1.ResourceName(strings.ToLower(dim)))
+			}
+		}
+	}
+
 	hierarchyEnabled := ssn.HierarchyEnabled(cp.Name())
 	readyToSchedule := true
 	if hierarchyEnabled {
@@ -120,6 +141,7 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			allocated := allocations[job.Queue]
 
 			exceptReclaimee := allocated.Clone().Sub(reclaimee.Resreq)
+
 			// When scalar resource not specified in deserved such as "pods", we should skip it and consider it as infinity,
 			// so the following first condition will be true and the current queue will not be reclaimed.
 			if allocated.LessEqual(attr.deserved, api.Infinity) || !attr.guarantee.LessEqual(exceptReclaimee, api.Zero) {
@@ -147,12 +169,13 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 		attr := cp.queueOpts[queue.UID]
 
 		futureUsed := attr.allocated.Clone().Add(task.Resreq)
-		allocatable, _ := futureUsed.LessEqualWithDimensionAndResourcesName(attr.deserved, task.Resreq)
+		filteredReq := task.Resreq.NullifyDimensions(cp.ignoreReclaimDimensions)
+		allocatable, _ := futureUsed.LessEqualWithDimensionAndResourcesName(attr.deserved, filteredReq)
 		overused := !allocatable
 		metrics.UpdateQueueOverused(attr.name, overused)
 		if overused {
-			klog.V(3).Infof("Queue <%v> can not reclaim, deserved <%v>, allocated <%v>, share <%v>, requested <%v>",
-				queue.Name, attr.deserved, attr.allocated, attr.share, task.Resreq)
+			klog.V(3).Infof("Queue <%v> can not reclaim, deserved <%v>, allocated <%v>, share <%v>, requested <%v>, filteredRequest <%v>",
+				queue.Name, attr.deserved, attr.allocated, attr.share, task.Resreq, filteredReq)
 		}
 
 		// PreemptiveFn is the opposite of OverusedFn in proportion plugin cause as long as there is a one-dimensional
@@ -358,6 +381,7 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 func (cp *capacityPlugin) OnSessionClose(ssn *framework.Session) {
 	cp.totalResource = nil
 	cp.totalGuarantee = nil
+	cp.ignoreReclaimDimensions = nil
 	cp.queueOpts = nil
 }
 

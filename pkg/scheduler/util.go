@@ -25,7 +25,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/klog/v2"
@@ -33,6 +32,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/plugins"
+	pluginsUtil "volcano.sh/volcano/pkg/scheduler/plugins/util"
 	"volcano.sh/volcano/pkg/util"
 )
 
@@ -81,9 +81,9 @@ func UnmarshalSchedulerConf(confStr string) ([]framework.Action, []conf.Tier, []
 		}
 	}
 
-	actionNames := strings.Split(schedulerConf.Actions, ",")
+	actionNames := pluginsUtil.SplitAndTrim(schedulerConf.Actions, ",")
 	for _, actionName := range actionNames {
-		if action, found := framework.GetAction(strings.TrimSpace(actionName)); found {
+		if action, found := framework.GetAction(actionName); found {
 			actions = append(actions, action)
 		} else {
 			klog.Errorf("Failed to find Action %s, ignore it", actionName)

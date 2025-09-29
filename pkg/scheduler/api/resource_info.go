@@ -435,7 +435,7 @@ func (r *Resource) LessEqual(rr *Resource, defaultValue DimensionDefaultValue) b
 }
 
 // LessEqualWithDimensionAndResourcesName only compare the resource items in req param
-// Will return false and a slice of resource names ,which show what resources are insufficient
+// Will return false and a slice of resource names, which show what resources are insufficient
 // @param req define the resource item to be compared
 // if req is nil, equals r.LessEqualWithResourcesName(rr, Zero)
 func (r *Resource) LessEqualWithDimensionAndResourcesName(rr *Resource, req *Resource) (bool, []string) {
@@ -801,4 +801,29 @@ func ExceededPart(left, right *Resource) *Resource {
 
 	diff, _ := left.Diff(right, Zero)
 	return diff
+}
+
+// NullifyDimensions returns a copy of the resource with specified dimensions set to zero.
+func (r *Resource) NullifyDimensions(ignore ResourceNameList) *Resource {
+	if r == nil || len(ignore) == 0 {
+		return r.Clone()
+	}
+	ignoreSet := map[string]struct{}{}
+	for _, name := range ignore {
+		ignoreSet[strings.ToLower(string(name))] = struct{}{}
+	}
+	cloned := r.Clone()
+	for _, rn := range cloned.ResourceNames() {
+		dimStr := strings.ToLower(string(rn))
+		if _, skip := ignoreSet[dimStr]; skip {
+			if rn == v1.ResourceCPU {
+				cloned.MilliCPU = 0
+			} else if rn == v1.ResourceMemory {
+				cloned.Memory = 0
+			} else {
+				cloned.SetScalar(rn, 0)
+			}
+		}
+	}
+	return cloned
 }

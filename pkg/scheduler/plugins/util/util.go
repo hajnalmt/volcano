@@ -171,3 +171,16 @@ func FormatResourceNames(prefix, verb string, resourceNames []string) string {
 
 	return fmt.Sprintf("%s: %s", prefix, strings.Join(parts, ", "))
 }
+
+// SplitAndTrim splits a string by a separator and trims whitespace from each part.
+func SplitAndTrim(s, sep string) []string {
+	var result []string
+	parts := strings.SplitSeq(s, sep)
+	for p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
