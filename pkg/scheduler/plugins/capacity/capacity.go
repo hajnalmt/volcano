@@ -41,6 +41,8 @@ const (
 	// Using the name of the plugin will likely help us avoid collisions with other plugins.
 	capacityStateKey = PluginName
 	rootQueueID      = "root"
+	// Holds the argument key of parentBasedReclaimEnabled
+	parentBasedReclaimEnabled = "parentBasedReclaimEnabled"
 )
 
 type capacityPlugin struct {
@@ -51,15 +53,18 @@ type capacityPlugin struct {
 
 	queueOpts map[api.QueueID]*queueAttr
 	// Arguments given for the plugin
-	pluginArguments framework.Arguments
+	pluginArguments           framework.Arguments
+	parentBasedReclaimEnabled bool
 }
 
 type queueAttr struct {
-	queueID   api.QueueID
-	name      string
-	share     float64
-	ancestors []api.QueueID
-	children  map[api.QueueID]*queueAttr
+	queueID api.QueueID
+	name    string
+	share   float64
+
+	ancestors     []api.QueueID
+	parentQueueID api.QueueID
+	children      map[api.QueueID]*queueAttr
 
 	deserved  *api.Resource
 	allocated *api.Resource
@@ -76,12 +81,16 @@ type queueAttr struct {
 
 // New return capacityPlugin action
 func New(arguments framework.Arguments) framework.Plugin {
-	return &capacityPlugin{
-		totalResource:   api.EmptyResource(),
-		totalGuarantee:  api.EmptyResource(),
-		queueOpts:       map[api.QueueID]*queueAttr{},
-		pluginArguments: arguments,
+	// Create capacity plugin instance
+	capacityPlugin := &capacityPlugin{
+		totalResource:             api.EmptyResource(),
+		totalGuarantee:            api.EmptyResource(),
+		queueOpts:                 map[api.QueueID]*queueAttr{},
+		pluginArguments:           arguments,
+		parentBasedReclaimEnabled: false,
 	}
+	arguments.GetBool(&capacityPlugin.parentBasedReclaimEnabled, parentBasedReclaimEnabled)
+	return capacityPlugin
 }
 
 func (cp *capacityPlugin) Name() string {
@@ -96,8 +105,12 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	hierarchyEnabled := ssn.HierarchyEnabled(cp.Name())
 	readyToSchedule := true
+	parentBasedReclaimEnabled := false
 	if hierarchyEnabled {
 		readyToSchedule = cp.buildHierarchicalQueueAttrs(ssn)
+		// parentBasedReclaimEnabled is true, only when the argument is set to true and hierarchy is enabled.
+		parentBasedReclaimEnabled = cp.parentBasedReclaimEnabled
+		klog.V(4).Infof("Hierarchy is enabled in capacity plugin, with parentBasedReclaim: %v", parentBasedReclaimEnabled)
 	} else {
 		cp.buildQueueAttrs(ssn)
 	}
@@ -113,22 +126,85 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 		for _, reclaimee := range reclaimees {
 			job := ssn.Jobs[reclaimee.Job]
 			attr := cp.queueOpts[job.Queue]
+			klog.V(5).Infof("Considering reclaimee <%s/%s> from queue <%s> for reclaimer <%s/%s>.",
+				reclaimee.Namespace, reclaimee.Name, attr.queueID, reclaimer.Namespace, reclaimer.Name)
+			reclaimable := false
+			parentCheckNeeded := parentBasedReclaimEnabled && attr.parentQueueID != "" && attr.parentQueueID != rootQueueID
 
+			// If reclaimee doesn't have intersecting resourceDimensions with reclaimer we can skip it
+			reclaimerIntersecting, _ := api.IntersectNonZeroResourceNames(reclaimee.Resreq, reclaimer.Resreq)
+			if !reclaimerIntersecting {
+				klog.V(5).Infof("Reclaimee <%s/%s>: <%v> does not have intersecting resource dimensions with reclaimer <%s/%s>: <%v>, skip it.",
+					reclaimee.Namespace, reclaimee.Name, reclaimee.Resreq, reclaimer.Namespace, reclaimer.Name, reclaimer.Resreq)
+				continue
+			}
+
+			// allocations stores each queue's allocated resources, which is subtracted
+			// with the victim's resources for each victim (choosen reclaimee)
 			if _, found := allocations[job.Queue]; !found {
 				allocations[job.Queue] = attr.allocated.Clone()
 			}
 			allocated := allocations[job.Queue]
 
+			// Check guarantee
 			exceptReclaimee := allocated.Clone().Sub(reclaimee.Resreq)
-			// When scalar resource not specified in deserved such as "pods", we should skip it and consider it as infinity,
-			// so the following first condition will be true and the current queue will not be reclaimed.
-			if allocated.LessEqual(attr.deserved, api.Infinity) || !attr.guarantee.LessEqual(exceptReclaimee, api.Zero) {
+			reclaimable = attr.guarantee.LessEqual(exceptReclaimee, api.Zero)
+			if !reclaimable {
 				continue
 			}
+			if parentCheckNeeded {
+				parentAttr := cp.queueOpts[attr.parentQueueID]
+				exceptReclaimeeParent := parentAttr.allocated.Clone().Sub(reclaimee.Resreq)
+				reclaimable = parentAttr.guarantee.LessEqual(exceptReclaimeeParent, api.Zero)
+				if !reclaimable {
+					continue
+				}
+			}
+
+			// Check intersecting resource dimensions with deserved
+			// If the reclaimee has no intersecting resource dimensions with deserved (or it's parents if the check is needed), it is a victim
+			deservedIntersecting, _ := api.IntersectNonZeroResourceNames(reclaimee.Resreq, attr.deserved)
+			if !deservedIntersecting && parentCheckNeeded {
+				parentDeservedIntersecting, _ := api.IntersectNonZeroResourceNames(reclaimee.Resreq, cp.queueOpts[attr.parentQueueID].deserved)
+				if !parentDeservedIntersecting {
+					allocated.Sub(reclaimee.Resreq)
+					victims = append(victims, reclaimee)
+					klog.V(5).Info("Current victims due to no deserved intersection (with parent):", victims)
+					continue
+				}
+			} else if !deservedIntersecting {
+				allocated.Sub(reclaimee.Resreq)
+				victims = append(victims, reclaimee)
+				klog.V(5).Info("Current victims due to no deserved intersection:", victims)
+				continue
+			}
+
+			// Check deserved
+			reclaimable, _ = queueReclaimableForRequest(attr, allocated, reclaimer)
+			if !reclaimable {
+				klog.V(5).Infof("Queue <%v> is not reclaimable for reclaimer <%v/%v>: "+
+					"deserved: <%v>, allocated: <%v>",
+					attr.name, attr.deserved, allocated, reclaimer.Namespace, reclaimer.Name)
+				continue
+			}
+			if parentCheckNeeded {
+				parentAttr := cp.queueOpts[attr.parentQueueID]
+				reclaimable, _ = queueReclaimableForRequest(parentAttr, parentAttr.allocated, reclaimer)
+				if !reclaimable {
+					klog.V(5).Infof("Queue's parent <%v> is not reclaimable for reclaimer <%v/%v>: "+
+						"parentDeserved: <%v>, parentAllocated: <%v>",
+						parentAttr.name, parentAttr.deserved, parentAttr.allocated, reclaimer.Namespace, reclaimer.Name)
+					continue
+				}
+			}
+			klog.V(5).Infof("Reclaimee <%s/%s> is a victim from queue <%s> for reclaimer <%s/%s>.",
+				reclaimee.Namespace, reclaimee.Name, attr.queueID, reclaimer.Namespace, reclaimer.Name)
 			allocated.Sub(reclaimee.Resreq)
 			victims = append(victims, reclaimee)
+			klog.V(5).Info("Current victims:", victims)
 		}
 		klog.V(4).Infof("Victims from capacity plugin, victims=%+v reclaimer=%s", victims, reclaimer)
+
 		return victims, util.Permit
 	})
 
@@ -156,14 +232,34 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 				"The futureUsed: %v, deserved: %v, allocated: %v, task requested: %v",
 				queue.Name, resourceNames, futureUsed, attr.deserved, attr.allocated, task.Resreq)
 		} else {
-			klog.V(3).Infof("Queue <%v> can not reclaim, futureUsed: %v, deserved: %v, requested: %v",
+			klog.V(4).Infof("Queue <%v> itself can not reclaim, futureUsed: %v, deserved: %v, requested: %v",
 				queue.Name, futureUsed, attr.deserved, task.Resreq)
+			// If parentBasedReclaimEnabled is true, check whether the direct parent can reclaim.
+			if parentBasedReclaimEnabled && attr.parentQueueID != "" && attr.parentQueueID != rootQueueID {
+				parentAttr := cp.queueOpts[attr.parentQueueID]
+				futureUsedParent := parentAttr.allocated.Clone().Add(task.Resreq)
+				isPreemptive, resourceNames = futureUsedParent.LessEqualPartlyWithDimensionZeroFiltered(parentAttr.deserved, task.Resreq)
+				if isPreemptive {
+					klog.V(3).Infof("Queue's parent <%v> can reclaim on resource dimensions: %v. "+
+						"The futureUsedParent: %v, deserved: %v, allocated: %v, task requested: %v",
+						parentAttr.name, resourceNames, futureUsedParent, parentAttr.deserved, parentAttr.allocated, task.Resreq)
+				} else {
+					klog.V(4).Infof("Queue <%v> and its parent <%v> can not reclaim."+
+						"The futureUsedParent: %v, parentDeserved: %v, requested: %v",
+						queue.Name, parentAttr.name, futureUsedParent, parentAttr.deserved, task.Resreq)
+				}
+			}
 		}
 
-		overused := !isPreemptive
+		// A queue is overused if deserved is less than allocated on every dimension.
+		overused := attr.deserved.Less(attr.allocated, api.Zero)
 		metrics.UpdateQueueOverused(attr.name, overused)
+		if overused {
+			klog.V(3).Infof("Queue <%v> is overused: deserved <%v>, allocated <%v>, share <%v>",
+				queue.Name, attr.deserved, attr.allocated, attr.share)
+		}
 
-		// PreemptiveFn is the opposite of OverusedFn in proportion plugin cause as long as there is a one-dimensional
+		// PreemptiveFn is the opposite of OverusedFn, as long as there is a one-dimensional
 		// resource whose deserved is greater than allocated, current task can reclaim by preempt others.
 		return isPreemptive
 	})
@@ -858,6 +954,59 @@ func queueAllocatable(attr *queueAttr, candidate *api.TaskInfo, queue *api.Queue
 	}
 
 	return allocatable
+}
+
+// queueReclaimableForRequest checks if a queue is reclaimable based on the reclaimer's requested dimensions.
+// Returns true if reclaimable, along with the list of dimensions that are reclaimable, else false and empty list.
+// The thorough check is needed because we don't have a proper way to say that we don't care about
+// deserved CPU or Memory when the user not specifies it.
+func queueReclaimableForRequest(attr *queueAttr, allocated *api.Resource, req *api.TaskInfo) (bool, []string) {
+	reclaimable := false
+	dimensions := []string{}
+	// match will store if there is a single dimension match between reclaimer request and queue deserved
+	match := false
+
+	// Check scalar resources first
+	for _, dim := range req.Resreq.ResourceNames() {
+		if api.IsIgnoredScalarResource(dim) || dim == v1.ResourceCPU || dim == v1.ResourceMemory {
+			continue
+		}
+		deservedVal, desOk := attr.deserved.ScalarResources[dim]
+		if !desOk {
+			continue
+		}
+		match = true
+		allocatedVal := allocated.Get(dim)
+		if deservedVal < allocatedVal {
+			reclaimable = true
+			dimensions = append(dimensions, string(dim))
+		}
+	}
+
+	// If there was a scalar match, but none were reclaimable, return false
+	if match && !reclaimable {
+		return false, []string{}
+	}
+
+	// If there was no scalar match, check CPU/memory
+	if !match {
+		// Check CPU and Memory only if there was no scalar match
+		if req.Resreq.MilliCPU > 0 && attr.deserved.MilliCPU < allocated.MilliCPU {
+			reclaimable = true
+			dimensions = append(dimensions, string(v1.ResourceCPU))
+		}
+		if req.Resreq.Memory > 0 && attr.deserved.Memory < allocated.Memory {
+			reclaimable = true
+			dimensions = append(dimensions, string(v1.ResourceMemory))
+		}
+	}
+
+	if reclaimable {
+		klog.V(5).Infof("Queue <%v> is reclaimable on dimension <%v>: "+
+			"deserved <%v>, allocated <%v>; Reclaimer <%v>: resource request <%v>",
+			attr.name, dimensions, attr.deserved, allocated, req.Name, req.Resreq)
+	}
+	return reclaimable, dimensions
 }
 
 func (cp *capacityPlugin) checkQueueAllocatableHierarchically(ssn *framework.Session, queue *api.QueueInfo, candidate *api.TaskInfo) bool {
