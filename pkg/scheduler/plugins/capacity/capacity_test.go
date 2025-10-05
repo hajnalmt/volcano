@@ -515,7 +515,6 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 	p14 := util.BuildPod("ns1", "p14", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/gpu", Value: "4"}}...), "pg14", make(map[string]string), map[string]string{})
 	p15 := util.BuildPod("ns1", "p15", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/gpu", Value: "4"}}...), "pg15", make(map[string]string), map[string]string{})
 
-<<<<<<< HEAD
 	// resources for test case 12
 	// queue
 	case12_queue1 := buildQueueWithParents("case12_queue1", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}}...), nil)
@@ -535,8 +534,6 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 	p17 := util.BuildPod("ns1", "p17", "n3", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}, {Name: "rdma/hca", Value: "1"}}...), "pg17", make(map[string]string), map[string]string{})
 	p18 := util.BuildPod("ns1", "p18", "n3", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}, {Name: "rdma/hca", Value: "1"}}...), "pg18", map[string]string{schedulingv1beta1.PodPreemptable: "false"}, map[string]string{})
 
-=======
->>>>>>> 502705d2b (inherit non-existent scalar resources from the parent queue)
 	tests := []uthelper.TestCommonStruct{
 		{
 			Name:      "case0: Pod allocatable when queue is leaf queue",
@@ -668,7 +665,6 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 			},
 			ExpectBindsNum: 2,
 		},
-<<<<<<< HEAD
 		{
 			Name:      "case12: Can reclaim from other queues when allocated <= deserved on a single scalar dimension",
 			Plugins:   plugins,
@@ -682,8 +678,6 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 			ExpectEvicted:  []string{"ns1/p17"},
 			ExpectEvictNum: 1,
 		},
-=======
->>>>>>> 502705d2b (inherit non-existent scalar resources from the parent queue)
 	}
 
 	tiers := []conf.Tier{
