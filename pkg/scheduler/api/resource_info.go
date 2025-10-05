@@ -873,6 +873,26 @@ func (r ResourceNameList) Contains(rr ResourceNameList) bool {
 	return true
 }
 
+// IntersectNonZeroResourceNames returns the resource names that exist in both resources and a boolean indicating if there is any intersection.
+func IntersectNonZeroResourceNames(r1, r2 *Resource) (bool, ResourceNameList) {
+	intersection := ResourceNameList{}
+	r1Names := r1.ResourceNames()
+	r2Names := r2.ResourceNames()
+	nameSet := map[v1.ResourceName]struct{}{}
+	for _, name := range r1Names {
+		nameSet[name] = struct{}{}
+	}
+	for _, name := range r2Names {
+		if _, exists := nameSet[name]; exists {
+			// Only include if non-zero in both resources
+			if r1.Get(name) >= minResource && r2.Get(name) >= minResource {
+				intersection = append(intersection, name)
+			}
+		}
+	}
+	return len(intersection) > 0, intersection
+}
+
 func IsCountQuota(name v1.ResourceName) bool {
 	return strings.HasPrefix(string(name), "count/")
 }
