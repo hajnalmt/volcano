@@ -534,6 +534,33 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 	p17 := util.BuildPod("ns1", "p17", "n3", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}, {Name: "rdma/hca", Value: "1"}}...), "pg17", make(map[string]string), map[string]string{})
 	p18 := util.BuildPod("ns1", "p18", "n3", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}, {Name: "rdma/hca", Value: "1"}}...), "pg18", map[string]string{schedulingv1beta1.PodPreemptable: "false"}, map[string]string{})
 
+	// resources for test case 13
+	arguments := framework.Arguments{
+		"parentBasedReclaimEnabled": true,
+	}
+	pluginsWithParentBasedReclaim := map[string]framework.PluginBuilder{
+		PluginName: func(args framework.Arguments) framework.Plugin {
+			return New(arguments)
+		},
+		predicates.PluginName: predicates.New,
+		gang.PluginName:       gang.New,
+	}
+	// node
+	n4 := util.BuildNode("n4", api.BuildResourceList("16", "16Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "4"}, {Name: "rdma/hca", Value: "1001"}, {Name: "pods", Value: "11"}}...), map[string]string{})
+
+	// queue
+	case13_queue1 := buildQueueWithParents("case13_queue1", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}}...), nil)
+	case13_queue11 := buildQueueWithParents("case13_queue11", "case13_queue1", nil, nil)
+	case13_queue2 := buildQueueWithParents("case13_queue2", "root", nil, nil)
+
+	// podgroup
+	pg19 := util.BuildPodGroup("pg19", "ns1", "case13_queue2", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg20 := util.BuildPodGroup("pg20", "ns1", "case13_queue11", 1, nil, schedulingv1beta1.PodGroupInqueue)
+
+	// pod
+	p19 := util.BuildPod("ns1", "p19", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "4"}, {Name: "rdma/hca", Value: "1"}}...), "pg19", make(map[string]string), map[string]string{})
+	p20 := util.BuildPod("ns1", "p20", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg20", make(map[string]string), map[string]string{})
+
 	tests := []uthelper.TestCommonStruct{
 		{
 			Name:      "case0: Pod allocatable when queue is leaf queue",
@@ -676,6 +703,19 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 				"ns1/pg16": {"n3"},
 			},
 			ExpectEvicted:  []string{"ns1/p17"},
+			ExpectEvictNum: 1,
+		},
+		{
+			Name:      "case13: Can reclaim based on parent deserved when parentBasedReclaimEnabled is true",
+			Plugins:   pluginsWithParentBasedReclaim,
+			Pods:      []*corev1.Pod{p19, p20},
+			Nodes:     []*corev1.Node{n4},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg19, pg20},
+			Queues:    []*schedulingv1beta1.Queue{root2, case13_queue1, case13_queue11, case13_queue2},
+			ExpectPipeLined: map[string][]string{
+				"ns1/pg20": {"n4"},
+			},
+			ExpectEvicted:  []string{"ns1/p19"},
 			ExpectEvictNum: 1,
 		},
 	}
