@@ -46,20 +46,26 @@ import (
 )
 
 var (
-	OneMinute  = 1 * time.Minute
-	TwoMinute  = 2 * time.Minute
-	FiveMinute = 5 * time.Minute
-	TenMinute  = 10 * time.Minute
-	OneCPU     = v1.ResourceList{"cpu": resource.MustParse("1000m")}
-	TwoCPU     = v1.ResourceList{"cpu": resource.MustParse("2000m")}
-	ThreeCPU   = v1.ResourceList{"cpu": resource.MustParse("3000m")}
-	ThirtyCPU  = v1.ResourceList{"cpu": resource.MustParse("30000m")}
-	HalfCPU    = v1.ResourceList{"cpu": resource.MustParse("500m")}
-	CPU1Mem1   = v1.ResourceList{"cpu": resource.MustParse("1000m"), "memory": resource.MustParse("1024Mi")}
-	CPU2Mem2   = v1.ResourceList{"cpu": resource.MustParse("2000m"), "memory": resource.MustParse("2048Mi")}
-	CPU4Mem4   = v1.ResourceList{"cpu": resource.MustParse("4000m"), "memory": resource.MustParse("4096Mi")}
-	CPU5Mem5   = v1.ResourceList{"cpu": resource.MustParse("5000m"), "memory": resource.MustParse("5120Mi")}
-	CPU6Mem6   = v1.ResourceList{"cpu": resource.MustParse("6000m"), "memory": resource.MustParse("6144Mi")}
+	OneSecond    = 1 * time.Second
+	TenSecond    = 10 * time.Second
+	TwentySecond = 20 * time.Second
+	ThirtySecond = 30 * time.Second
+	OneMinute    = 1 * time.Minute
+	TwoMinute    = 2 * time.Minute
+	FiveMinute   = 5 * time.Minute
+	TenMinute    = 10 * time.Minute
+	OneCPU       = v1.ResourceList{"cpu": resource.MustParse("1000m")}
+	TwoCPU       = v1.ResourceList{"cpu": resource.MustParse("2000m")}
+	ThreeCPU     = v1.ResourceList{"cpu": resource.MustParse("3000m")}
+	ThirtyCPU    = v1.ResourceList{"cpu": resource.MustParse("30000m")}
+	HalfCPU      = v1.ResourceList{"cpu": resource.MustParse("500m")}
+	CPU1Mem1     = v1.ResourceList{"cpu": resource.MustParse("1000m"), "memory": resource.MustParse("1024Mi")}
+	CPU2Mem2     = v1.ResourceList{"cpu": resource.MustParse("2000m"), "memory": resource.MustParse("2048Mi")}
+	CPU4Mem4     = v1.ResourceList{"cpu": resource.MustParse("4000m"), "memory": resource.MustParse("4096Mi")}
+	CPU5Mem5     = v1.ResourceList{"cpu": resource.MustParse("5000m"), "memory": resource.MustParse("5120Mi")}
+	CPU6Mem6     = v1.ResourceList{"cpu": resource.MustParse("6000m"), "memory": resource.MustParse("6144Mi")}
+	ScalarA100   = v1.ResourceList{"cpu": resource.MustParse("6000m"), "memory": resource.MustParse("6144Mi"), "nvidia.com/A100": resource.MustParse(("2")), "rdma/hca": resource.MustParse(("1"))}
+	ScalarH100   = v1.ResourceList{"cpu": resource.MustParse("6000m"), "memory": resource.MustParse("6144Mi"), "nvidia.com/H100": resource.MustParse(("2")), "rdma/hca": resource.MustParse(("1"))}
 )
 
 const (

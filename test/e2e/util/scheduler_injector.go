@@ -26,7 +26,7 @@ import (
 )
 
 // schedulerInjectingClientset is used to wrap the Kubernetes clientset and inject a specific scheduler name, which is volcano in our e2e cases by default.
-// Then we don't need to use like gomonkey tools to patch k8s e2e methods to inject the scheduler name.
+// Then we don't need to use tools like gomonkey to patch k8s e2e methods to inject the scheduler name.
 type schedulerInjectingClientset struct {
 	kubernetes.Interface
 	schedulerName string
