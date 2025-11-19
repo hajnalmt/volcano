@@ -130,6 +130,9 @@ unit-test:
 e2e: images
 	./hack/run-e2e-kind.sh
 
+e2e-mate:
+	E2E_TYPE=MATE CLEANUP_CLUSTER=0 ./hack/run-e2e-kind.sh
+
 e2e-test-schedulingbase: images
 	# volume binding e2e testing has some cases using "kubernetes.io/no-provisioner" as the storage provisioner, so we need to specify an ignored provisioner here.
 	E2E_TYPE=SCHEDULINGBASE IGNORED_PROVISIONERS="kubernetes.io/no-provisioner" ./hack/run-e2e-kind.sh

@@ -109,3 +109,7 @@ function install-kwok-with-helm {
   # delete pod-complete stage to avoid volcano-job-pod change status to complete.
   kubectl delete stage pod-complete
 }
+
+function install-volcano-monitoring {
+  kubectl apply -f installer/volcano-monitoring.yaml
+}

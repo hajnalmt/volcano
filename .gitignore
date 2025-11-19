@@ -142,3 +142,7 @@ vendor
 
 # helm dependency files
 installer/helm/chart/volcano/requirements.lock
+
+# asdf
+.tool-versions
+/volcano-e2e-logs

@@ -213,6 +213,23 @@ local_resource(
     labels=["tests-install"]
 )
 
+local_resource(
+    'install-a100-nodes',
+    'bash -c "source ' + root_dir + 'hack/kwok.sh && install-kwok-a100-nodes 50"',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=["tests-install"]
+)
+local_resource(
+    'delete-a100-nodes',
+    'bash -c "source ' + root_dir + 'hack/kwok.sh && delete-kwok-a100-nodes 50"',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=["tests-install"]
+)
+
+
+
 # Optionally, run e2e tests (using local_resource)
 local_resource(
     'unit-tests',
@@ -241,7 +258,7 @@ local_resource(
 
 local_resource(
     'e2e-tests-jobp',
-    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress ./test/e2e/jobp/",
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/jobp/",
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]
@@ -249,7 +266,7 @@ local_resource(
 
 local_resource(
     'e2e-tests-jobseq',
-    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/",
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/jobseq/",
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]
@@ -257,7 +274,7 @@ local_resource(
 
 local_resource(
     'e2e-tests-schedulingbase',
-    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingbase/",
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/schedulingbase/",
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]
@@ -265,7 +282,7 @@ local_resource(
 
 local_resource(
     'e2e-tests-schedulingaction',
-    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingaction/",
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/schedulingaction/",
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]
@@ -273,7 +290,7 @@ local_resource(
 
 local_resource(
     'e2e-tests-vcctl',
-    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/vcctl/",
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/vcctl/",
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]
@@ -281,7 +298,7 @@ local_resource(
 
 local_resource(
     'e2e-tests-dra',
-    'KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold="30s" --progress --focus="DRA E2E Test" ./test/e2e/dra/',
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress --focus='DRA E2E Test' " + root_dir + "test/e2e/dra/",
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]
@@ -289,7 +306,23 @@ local_resource(
 
 local_resource(
     'e2e-tests-hypernode',
-    'KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold="30s" --progress ./test/e2e/hypernode/',
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/hypernode/",
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=["tests"]
+)
+
+local_resource(
+    'e2e-tests-cronjob',
+    "KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold='30s' --progress " + root_dir + "test/e2e/cronjob/",
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=["tests"]
+)
+
+local_resource(
+    'e2e-tests-mate',
+    'KUBECONFIG=${KUBECONFIG} ginkgo -v -r --slow-spec-threshold="30s" --progress ' + root_dir + 'test/e2e/mate/',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=["tests"]

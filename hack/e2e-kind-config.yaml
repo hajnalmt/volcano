@@ -10,6 +10,19 @@ containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri"]
       enable_cdi = true
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+      endpoint = ["https://common-docker-r.eu.artifactory.conti.de"]
+    [host."https://common-docker-r.eu.artifactory.conti.de"]
+      capabilities = ["pull", "resolve"]
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.k8s.io"]
+      endpoint = ["https://am-enp-common-registry-k8s-docker-r.eu.artifactory.conti.de"]
+    [host."https://am-enp-common-registry-k8s-docker-r.eu.artifactory.conti.de"]
+      capabilities = ["pull", "resolve"]
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."quay.io"]
+      endpoint = ["https://common-quay-docker-r.eu.artifactory.conti.de"]
+    [host."https://common-quay-docker-r.eu.artifactory.conti.de"]
+      capabilities = ["pull", "resolve"]
+
 # 1 control plane node and 4 workers
 nodes:
   # the control plane node config
@@ -25,7 +38,7 @@ nodes:
           extraArgs:
             runtime-config: "resource.k8s.io/v1beta1=true"
   # the four workers
-  - role: worker
-  - role: worker
-  - role: worker
-  - role: worker
+  # - role: worker
+  # - role: worker
+  # - role: worker
+  # - role: worker

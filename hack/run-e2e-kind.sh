@@ -66,6 +66,7 @@ status:
     cpu: "${KWOK_NODE_CPU}"
     memory: "${KWOK_NODE_MEMORY}"
     pods: "110"
+    nvidia.com/A100: "2"
   allocatable:
     cpu: "${KWOK_NODE_CPU}"
     memory: "${KWOK_NODE_MEMORY}"
@@ -112,6 +113,7 @@ basic:
 
 custom:
   scheduler_log_level: 5
+  scheduler_schedule_period: 10s
   admission_tolerations:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
@@ -244,6 +246,19 @@ case ${E2E_TYPE} in
 "CRONJOB")  
     echo "Running cronjob e2e suite..."  
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/cronjob/  
+    ;;
+"MATE")
+    # Checking bugs related to https://github.com/volcano-sh/volcano/pull/4354/files#
+    # Metrics: https://github.com/volcano-sh/volcano/pull/4487
+    # 
+    echo "Creating 2 kwok nodes for mate e2e test"
+    source "${VK_ROOT}/hack/kwok.sh"
+
+    install-volcano-monitoring
+    install-kwok-a100-nodes 3
+
+    echo "Running mate e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/mate/
     ;;
 esac
 
