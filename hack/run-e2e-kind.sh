@@ -309,7 +309,7 @@ case ${E2E_TYPE} in
     ;;
 "JOBSEQ")
     echo "Running sequence job e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -vv -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/
     ;;
 "SCHEDULINGBASE")
     echo "Running scheduling base e2e suite..."
