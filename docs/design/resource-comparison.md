@@ -1,5 +1,7 @@
 # Resource Comparison
 
+Author @[Thor-wl](https://github.com/Thor-wl); June 29th, 2021
+
 ## Motivation
 When review the issues about proportion plugin and preempt action bug report, I found that the root reason of most bugs
 are related with existing resource comparison functions `Less` `LessEqual` `LessEqualStrict`. After a tour of deep analysis,

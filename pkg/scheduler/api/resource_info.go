@@ -699,6 +699,13 @@ func (r *Resource) Equal(rr *Resource, defaultValue DimensionDefaultValue) bool 
 	return true
 }
 
+// Greater returns true only on condition that all dimensions of resources in r are greater than that of rr,
+// Otherwise returns false.
+// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+func (r *Resource) Greater(rr *Resource, defaultValue DimensionDefaultValue) bool {
+	return !r.LessEqualPartly(rr, defaultValue)
+}
+
 // Diff calculate the difference between two resource object
 // Note: if `defaultValue` equals `Infinity`, the difference between two values will be `Infinity`, marked as -1
 func (r *Resource) Diff(rr *Resource, defaultValue DimensionDefaultValue) (*Resource, *Resource) {
