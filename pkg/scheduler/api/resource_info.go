@@ -24,6 +24,7 @@ package api
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -699,6 +700,33 @@ func (r *Resource) Equal(rr *Resource, defaultValue DimensionDefaultValue) bool 
 	return true
 }
 
+// Greater returns true only on condition that all dimensions of resources in r are greater than that of rr,
+// Otherwise returns false.
+// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+func (r *Resource) Greater(rr *Resource, defaultValue DimensionDefaultValue) bool {
+	return !r.LessEqualPartly(rr, defaultValue)
+}
+
+// GreaterEqual returns true only on condition that all dimensions of resources in r are greater than or equal with that of rr,
+// Otherwise returns false.
+// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+func (r *Resource) GreaterEqual(rr *Resource, defaultValue DimensionDefaultValue) bool {
+	return !r.LessPartly(rr, defaultValue)
+}
+
+// GreaterPartly returns true if there exists any dimension whose resource amount in r is greater than that in rr.
+// Otherwise returns false.
+// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+func (r *Resource) GreaterPartly(rr *Resource, defaultValue DimensionDefaultValue) bool {
+	return !r.LessEqual(rr, defaultValue)
+}
+
+// GreaterEqualPartly returns true if there exists any dimension whose resource amount in r is greater than or equal with that in rr.
+// Otherwise returns false.
+func (r *Resource) GreaterEqualPartly(rr *Resource, defaultValue DimensionDefaultValue) bool {
+	return !r.Less(rr, defaultValue)
+}
+
 // Diff calculate the difference between two resource object
 // Note: if `defaultValue` equals `Infinity`, the difference between two values will be `Infinity`, marked as -1
 func (r *Resource) Diff(rr *Resource, defaultValue DimensionDefaultValue) (*Resource, *Resource) {
@@ -859,13 +887,7 @@ type ResourceNameList []v1.ResourceName
 // Contains judges whether rr is subset of r
 func (r ResourceNameList) Contains(rr ResourceNameList) bool {
 	for _, rrName := range ([]v1.ResourceName)(rr) {
-		isResourceExist := false
-		for _, rName := range ([]v1.ResourceName)(r) {
-			if rName == rrName {
-				isResourceExist = true
-				break
-			}
-		}
+		isResourceExist := slices.Contains(([]v1.ResourceName)(r), rrName)
 		if !isResourceExist {
 			return false
 		}

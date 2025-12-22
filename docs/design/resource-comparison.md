@@ -1,5 +1,9 @@
 # Resource Comparison
 
+Author @[Thor-wl](https://github.com/Thor-wl); June 29th, 2021
+
+Updated @[hajnalmt](https://github.com/hajnalmt); January 7th, 2026
+
 ## Motivation
 When review the issues about proportion plugin and preempt action bug report, I found that the root reason of most bugs
 are related with existing resource comparison functions `Less` `LessEqual` `LessEqualStrict`. After a tour of deep analysis,
@@ -76,3 +80,21 @@ and provide solution about completing existing functions as following parts.
 | :----: | :----: | :----: | :----: | :----: |
 | defaultValue = zero | false | false | true | true |
 | defaultValue = infinity | false | false | true | true |
+
+## Update
+
+As we tried to refactor the capacity plugin's reclaimable related problems we realized there are some enhancements need to be done on our resource handling logic.
+
+### So far done
+
+Back in 2021, when proportion plugin was on it's way, there were discussions about the resource comparision logic in volcano in general.
+[Weird Resource Less behavior #1036](https://github.com/volcano-sh/volcano/issues/1036)
+This led to a refactor by Thor-wl:
+- [Pull request #1573](https://github.com/volcano-sh/volcano/pull/1573)
+- [Pull request #1622](https://github.com/volcano-sh/volcano/pull/1622)
+
+And it has been extended on a various occasions:
+- [Pull request #1624](https://github.com/volcano-sh/volcano/pull/1624)
+- [Pull request #1637](https://github.com/volcano-sh/volcano/pull/1637)
+- [Pull request #1637](https://github.com/volcano-sh/volcano/pull/4544)
+- [Pull request #2998](https://github.com/volcano-sh/volcano/pull/2998/files#diff-51847aeb1a0f351ab44ed1f9c34c066a70d38f8a5a6ec1c23276d39315b5788a)
