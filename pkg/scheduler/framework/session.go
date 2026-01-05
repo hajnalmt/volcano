@@ -117,6 +117,7 @@ type Session struct {
 	jobOrderFns         map[string]api.CompareFn
 	queueOrderFns       map[string]api.CompareFn
 	victimQueueOrderFns map[string]api.VictimCompareFn
+	victimTaskOrderFns  map[string]api.VictimTaskCompareFn
 	taskOrderFns        map[string]api.CompareFn
 	clusterOrderFns     map[string]api.CompareFn
 	predicateFns        map[string]api.PredicateFn
@@ -192,6 +193,7 @@ func openSession(cache cache.Cache) *Session {
 		jobOrderFns:                   map[string]api.CompareFn{},
 		queueOrderFns:                 map[string]api.CompareFn{},
 		victimQueueOrderFns:           map[string]api.VictimCompareFn{},
+		victimTaskOrderFns:            map[string]api.VictimTaskCompareFn{},
 		taskOrderFns:                  map[string]api.CompareFn{},
 		clusterOrderFns:               map[string]api.CompareFn{},
 		predicateFns:                  map[string]api.PredicateFn{},
