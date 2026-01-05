@@ -675,6 +675,21 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 		return 1
 	})
 
+	ssn.AddVictimTaskOrderFn(cp.Name(), func(l, r, preemptor interface{}) int {
+		lt := l.(*api.TaskInfo)
+		rt := r.(*api.TaskInfo)
+		pt := preemptor.(*api.TaskInfo)
+		lPtIntersection := api.Intersection(lt.Resreq, pt.Resreq)
+		rPtIntersection := api.Intersection(rt.Resreq, pt.Resreq)
+
+		if len(lPtIntersection) == len(rPtIntersection) {
+			return 0
+		} else if len(lPtIntersection) > len(rPtIntersection) {
+			return -1
+		}
+
+		return 1
+	})
 	return true
 }
 
