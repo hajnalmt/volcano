@@ -35,7 +35,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 
+	"k8s.io/klog/v2"
 	vcbatch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
+	helpers "volcano.sh/apis/pkg/apis/helpers"
 	scheduling "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	topologyv1alpha1 "volcano.sh/apis/pkg/apis/topology/v1alpha1"
 	vcclient "volcano.sh/apis/pkg/client/clientset/versioned/fake"
@@ -47,6 +49,10 @@ import (
 )
 
 func newFakeController() *pgcontroller {
+	// Change klog log level to new value
+	var logLevel klog.Level
+	logLevel.Set("5")
+
 	kubeClient := kubeclient.NewSimpleClientset()
 	vcClient := vcclient.NewSimpleClientset()
 	sharedInformers := informers.NewSharedInformerFactory(kubeClient, 0)
@@ -1057,14 +1063,18 @@ func Test_pgcontroller_buildPodGroupFromPod(t *testing.T) {
 	})
 }
 
-func Test_pgcontroller_updateExistingPodGroup(t *testing.T) {
+func Test_pgcontroller_updatePodGroup(t *testing.T) {
 	// Common test data
+	namespace := "test-ns"
 	podName := "test-pod"
-	podNamespace := "test-ns"
 	pgName := "test-pg"
 	podUID := types.UID("test-pod-uid")
+	isController := true
+	// replicas := int32(2)
+	ownerUID := types.UID("owner-uid-123")
+	gpuKey := v1.ResourceName("nvidia.com/gpu")
 
-	t.Run("Sts spec/annotations/labels updated", func(t *testing.T) {
+	t.Run("Native podgroup spec/annotations/labels updated", func(t *testing.T) {
 		c := newFakeController()
 		c.inheritOwnerAnnotations = false
 
@@ -1072,7 +1082,7 @@ func Test_pgcontroller_updateExistingPodGroup(t *testing.T) {
 		pod := &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      podName,
-				Namespace: podNamespace,
+				Namespace: namespace,
 				UID:       podUID,
 				Annotations: map[string]string{
 					scheduling.QueueNameAnnotationKey: "test-queue",
@@ -1118,6 +1128,85 @@ func Test_pgcontroller_updateExistingPodGroup(t *testing.T) {
 		if !isUpdated {
 			t.Error("expected isUpdated true, got false")
 		}
+	})
+	t.Run("ReplicaSet update propagates to PodGroup", func(t *testing.T) {
+		c := newFakeController()
+		c.inheritOwnerAnnotations = true
+
+		// Initial ReplicaSet with minMember=1
+		rs := &appsv1.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "rs1",
+				Namespace:   namespace,
+				UID:         ownerUID,
+				Annotations: map[string]string{scheduling.VolcanoGroupMinMemberAnnotationKey: "1"},
+			},
+			Spec: appsv1.ReplicaSetSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "rs1"}},
+				Template: v1.PodTemplateSpec{
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{{
+							Name: "c",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{gpuKey: resource.MustParse("1")},
+							},
+						}},
+						SchedulerName: "volcano",
+					},
+				},
+			},
+		}
+		_, err := c.kubeClient.AppsV1().ReplicaSets(namespace).Create(context.TODO(), rs, metav1.CreateOptions{})
+		assert.NoError(t, err)
+
+		// Pod owned by ReplicaSet
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podName,
+				Namespace: namespace,
+				Labels:    map[string]string{"app": "rs1"},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "apps/v1",
+					Kind:       "ReplicaSet",
+					Name:       "rs1",
+					UID:        ownerUID,
+					Controller: &isController,
+				}},
+			},
+			Spec: v1.PodSpec{
+				Containers: []v1.Container{{
+					Name: "c",
+					Resources: v1.ResourceRequirements{
+						Requests: v1.ResourceList{gpuKey: resource.MustParse("1")},
+					},
+				}},
+				SchedulerName: "volcano",
+			},
+		}
+		_, err = c.kubeClient.CoreV1().Pods(namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+		assert.NoError(t, err)
+		c.podInformer.Informer().GetIndexer().Add(pod)
+		c.addPod(pod)
+		c.rsInformer.Informer().GetIndexer().Add(rs)
+		c.addReplicaSet(rs)
+		c.processNextReq()
+
+		pgName := helpers.GeneratePodgroupName(pod)
+		pg, err := c.vcClient.SchedulingV1beta1().PodGroups(namespace).Get(context.TODO(), pgName, metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, int32(1), pg.Spec.MinMember)
+
+		// Update ReplicaSet annotation to minMember=3
+		rs.Annotations[scheduling.VolcanoGroupMinMemberAnnotationKey] = "3"
+		_, err = c.kubeClient.AppsV1().ReplicaSets(namespace).Update(context.TODO(), rs, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+		c.updateReplicaSet(rs, rs)
+		c.rsInformer.Informer().GetIndexer().Update(rs)
+
+		// PodGroup should be updated
+		pg, err = c.vcClient.SchedulingV1beta1().PodGroups(namespace).Get(context.TODO(), pgName, metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, int32(3), pg.Spec.MinMember)
 	})
 }
 

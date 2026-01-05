@@ -41,6 +41,9 @@ import (
 
 func init() {
 	framework.RegisterController(&pgcontroller{})
+	// Change klog log level to new value
+	var logLevel klog.Level
+	logLevel.Set("5")
 }
 
 // pgcontroller the Podgroup pgcontroller type.

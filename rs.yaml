@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: nginx-volcano
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: nginx-volcano
+  template:
+    metadata:
+      labels:
+        app: nginx-volcano
+    spec:
+      schedulerName: volcano
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - containerPort: 80

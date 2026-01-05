@@ -122,6 +122,52 @@ func (pg *pgcontroller) addReplicaSet(obj interface{}) {
 
 func (pg *pgcontroller) updateReplicaSet(oldObj, newObj interface{}) {
 	pg.addReplicaSet(newObj)
+	pg.updatePodGroupFromReplicaSetAnnotations(oldObj.(*appsv1.ReplicaSet), newObj.(*appsv1.ReplicaSet))
+}
+
+func (pg *pgcontroller) updatePodGroupFromReplicaSetAnnotations(oldRS, newRS *appsv1.ReplicaSet) {
+	oldAnno := oldRS.Annotations
+	newAnno := newRS.Annotations
+
+	// Only proceed if relevant annotation(s) changed
+	if reflect.DeepEqual(oldAnno, newAnno) {
+		return
+	}
+
+	// Find the PodGroup name (by convention, using ReplicaSet UID)
+	pgName := batchv1alpha1.PodgroupNamePrefix + string(newRS.UID)
+	podGroup, err := pg.pgLister.PodGroups(newRS.Namespace).Get(pgName)
+	if err != nil {
+		return // PodGroup not found, nothing to update
+	}
+	needUpdate := false
+	podGroupToUpdate := podGroup.DeepCopy()
+
+	// Example: handle minMember annotation
+	if minMemberAnno, ok := newAnno[scheduling.VolcanoGroupMinMemberAnnotationKey]; ok {
+		minMemberFromAnno, err := strconv.ParseInt(minMemberAnno, 10, 32)
+		if err == nil && int32(minMemberFromAnno) != podGroupToUpdate.Spec.MinMember {
+			podGroupToUpdate.Spec.MinMember = int32(minMemberFromAnno)
+			needUpdate = true
+		}
+	}
+
+	// Inherit all volcano scheduling annotations if enabled
+	if pg.inheritOwnerAnnotations {
+		for k, v := range newAnno {
+			if strings.HasPrefix(k, scheduling.AnnotationPrefix) && podGroupToUpdate.Annotations[k] != v {
+				podGroupToUpdate.Annotations[k] = v
+				needUpdate = true
+			}
+		}
+	}
+
+	if needUpdate {
+		_, err := pg.vcClient.SchedulingV1beta1().PodGroups(newRS.Namespace).Update(context.TODO(), podGroupToUpdate, metav1.UpdateOptions{})
+		if err != nil {
+			klog.Errorf("Failed to update PodGroup %s: %v", pgName, err)
+		}
+	}
 }
 
 func (pg *pgcontroller) addStatefulSet(obj interface{}) {
@@ -266,14 +312,14 @@ func (pg *pgcontroller) getAnnotationsFromUpperRes(pod *v1.Pod) map[string]strin
 	return annotations
 }
 
-func (pg *pgcontroller) getMinMemberFromUpperRes(upperAnnotations map[string]string, namespance, name string) int32 {
+func (pg *pgcontroller) getMinMemberFromUpperRes(upperAnnotations map[string]string, namespace, pgName string) int32 {
 	minMember := int32(1)
 
 	if minMemberAnno, ok := upperAnnotations[scheduling.VolcanoGroupMinMemberAnnotationKey]; ok {
 		minMemberFromAnno, err := strconv.ParseInt(minMemberAnno, 10, 32)
 		if err != nil {
-			klog.Errorf("Failed to convert minMemberAnnotation of Pod owners <%s/%s> into number: %v, minMember remains as 1",
-				namespance, name, err)
+			klog.Errorf("Failed to convert minMemberAnnotation for podgroup <%s/%s> into number: %v, minMember remains as 1",
+				namespace, pgName, err)
 			return minMember
 		}
 		if minMemberFromAnno < 0 {
@@ -306,7 +352,8 @@ func (pg *pgcontroller) createNormalPodPGIfNotExist(pod *v1.Pod) error {
 				pod.Namespace, pod.Name, err)
 			return err
 		}
-
+		klog.Infof("PodGroup <%s/%s> not found, need to create a new one for Pod <%s/%s>",
+			pod.Namespace, pgName, pod.Namespace, pod.Name)
 		podGroup := pg.buildPodGroupFromPod(pod, pgName)
 		if _, err := pg.vcClient.SchedulingV1beta1().PodGroups(pod.Namespace).Create(context.TODO(), podGroup, metav1.CreateOptions{}); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
@@ -332,6 +379,8 @@ func (pg *pgcontroller) createOrUpdateNormalPodPG(pod *v1.Pod) error {
 	pgName := helpers.GeneratePodgroupName(pod)
 
 	if podGroup, err := pg.pgLister.PodGroups(pod.Namespace).Get(pgName); err != nil {
+		klog.Infof("PodGroup <%s/%s> not found, need to create a new one for Pod <%s/%s>",
+			pod.Namespace, pgName, pod.Namespace, pod.Name)
 		if !apierrors.IsNotFound(err) {
 			klog.Errorf("Failed to get normal PodGroup for Pod <%s/%s>: %v",
 				pod.Namespace, pod.Name, err)
@@ -372,7 +421,7 @@ func (pg *pgcontroller) buildPodGroupFromPod(pod *v1.Pod, pgName string) *schedu
 	var ownerAnnotations = make(map[string]string)
 	if pg.inheritOwnerAnnotations {
 		ownerAnnotations = pg.getAnnotationsFromUpperRes(pod)
-		minMember = pg.getMinMemberFromUpperRes(ownerAnnotations, pod.Namespace, pod.Name)
+		minMember = pg.getMinMemberFromUpperRes(ownerAnnotations, pod.Namespace, pgName)
 	}
 	minResources := util.CalTaskRequests(pod, minMember)
 	obj := &scheduling.PodGroup{
