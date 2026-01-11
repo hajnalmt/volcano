@@ -172,6 +172,14 @@ func (ra *Action) Execute(ssn *framework.Session) {
 	}
 }
 
+// nodeVictimsInfo holds the reclaim information for a single node.
+type nodeVictimsInfo struct {
+	node               *api.NodeInfo
+	victims            *util.PriorityQueue
+	reclaimed          *api.Resource
+	availableResources *api.Resource
+}
+
 func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, job *api.JobInfo) {
 	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
 	predicateHelper := util.NewPredicateHelper()
@@ -181,6 +189,16 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 	for _, nodes := range predicateNodesByShard {
 		predicateNodesByShardFlattened = append(predicateNodesByShardFlattened, nodes...)
 	}
+
+	// Create the global allVictims priority queue using the same ordering as per-node queues
+	allVictims := ssn.BuildAumovioVictimPriorityQueue(nil, task)
+
+	// Map from victim UID to the node it belongs to
+	victimToNode := make(map[api.TaskID]*api.NodeInfo)
+
+	// Collect all possible victims for each node
+	nodeVictimsMap := make(map[string]*nodeVictimsInfo)
+
 	for _, n := range predicateNodesByShardFlattened {
 		klog.V(3).Infof("Considering Task <%s/%s> on Node <%s>.", task.Namespace, task.Name, n.Name)
 
@@ -207,50 +225,141 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		}
 
 		victims := ssn.Reclaimable(task, reclaimees)
+
 		if err := util.ValidateVictims(task, n, victims); err != nil {
 			klog.V(3).Infof("No validated victims on Node <%s>: %v", n.Name, err)
 			continue
 		}
 
-		victimsQueue := ssn.BuildAumovioVictimPriorityQueue(victims, task)
-		resreq := task.InitResreq.Clone()
-		reclaimed := api.EmptyResource()
+		// Build per-node victims priority queue
+		nodeVictimsQueue := ssn.BuildAumovioVictimPriorityQueue(victims, task)
 
-		// The reclaimed resources should be added to the remaining available resources of the nodes to avoid over-reclaiming.
-		availableResources := n.FutureIdle()
+		// Store node info
+		nodeVictimsMap[n.Name] = &nodeVictimsInfo{
+			node:               n,
+			victims:            nodeVictimsQueue,
+			reclaimed:          api.EmptyResource(),
+			availableResources: n.FutureIdle().Clone(),
+		}
 
+		// Push all victims to the global queue and track their node
+		for _, victim := range victims {
+			allVictims.Push(victim)
+			victimToNode[victim.UID] = n
+		}
+	}
+
+	// No victims found across all nodes
+	if allVictims.Empty() {
+		klog.V(3).Infof("No victims found for Task <%s/%s>.", task.Namespace, task.Name)
+		return
+	}
+
+	// Save the original statement operations before trying any node
+	// This allows us to restore the original state if all node attempts fail
+	savedOriginalStmt := framework.SaveOperations(stmt)
+
+	// Set of nodes we've already tried and failed
+	triedNodes := make(map[string]bool)
+
+	// Try to reclaim from nodes based on the global victims priority
+	for !allVictims.Empty() {
+		// Pop the highest priority victim to determine which node to try
+		initiatorVictim := allVictims.Pop().(*api.TaskInfo)
+		victimNode := victimToNode[initiatorVictim.UID]
+
+		// Log the initiator victim that triggered this node's reclaim attempt
+		klog.V(3).Infof("Initiator victim <%s/%s> picked from allVictims queue, triggering reclaim attempt on Node <%s> for Task <%s/%s>.",
+			initiatorVictim.Namespace, initiatorVictim.Name, victimNode.Name, task.Namespace, task.Name)
+
+		// Skip if we've already tried this node
+		if triedNodes[victimNode.Name] {
+			klog.V(4).Infof("Node <%s> already tried, skipping.", victimNode.Name)
+			continue
+		}
+
+		// Create a local statement for this node's eviction attempts
+		nodeStmt := framework.NewStatement(ssn)
+
+		// Clone the node's victims queue to iterate through
+		nodeInfo := nodeVictimsMap[victimNode.Name]
+		nodeVictimsQueue := nodeInfo.victims.Clone()
+		reclaimed := nodeInfo.reclaimed.Clone()
+		availableResources := nodeInfo.availableResources.Clone()
+		evictionFailed := false
 		evictionOccurred := false
-		for !victimsQueue.Empty() {
-			reclaimee := victimsQueue.Pop().(*api.TaskInfo)
-			klog.V(3).Infof("Try to reclaim Task <%s/%s> for Tasks <%s/%s>",
-				reclaimee.Namespace, reclaimee.Name, task.Namespace, task.Name)
-			if err := stmt.Evict(reclaimee, "reclaim"); err != nil {
-				klog.Errorf("Failed to reclaim Task <%s/%s> for Tasks <%s/%s>: %v",
-					reclaimee.Namespace, reclaimee.Name, task.Namespace, task.Name, err)
-				continue
+		taskCanBePipelined := false
+
+		for !nodeVictimsQueue.Empty() {
+			victim := nodeVictimsQueue.Pop().(*api.TaskInfo)
+			klog.V(3).Infof("Try to reclaim Task <%s/%s> for Tasks <%s/%s> on Node <%s>",
+				victim.Namespace, victim.Name, task.Namespace, task.Name, victimNode.Name)
+
+			if err := nodeStmt.Evict(victim, "reclaim"); err != nil {
+				klog.Errorf("Failed to reclaim Task <%s/%s> for Task <%s/%s> on Node <%s>: %v",
+					victim.Namespace, victim.Name, task.Namespace, task.Name, victimNode.Name, err)
+				evictionFailed = true
+				break
 			}
-			reclaimed.Add(reclaimee.Resreq)
-			availableResources.Add(reclaimee.Resreq)
+
+			reclaimed.Add(victim.Resreq)
+			availableResources.Add(victim.Resreq)
 			evictionOccurred = true
-			if resreq.LessEqual(availableResources, api.Zero) {
+
+			klog.V(3).Infof("Reclaimed <%v/%v> for task <%s/%s> requested <%v> on "+
+				"Node <%s> with availableResources <%v> and reclaimed <%v>.",
+				victim.Namespace, victim.Name, task.Namespace, task.Name, task.InitResreq,
+				victimNode.Name, availableResources, reclaimed)
+
+			if task.InitResreq.LessEqual(availableResources, api.Zero) {
+				taskCanBePipelined = true
 				break
 			}
 		}
+		triedNodes[victimNode.Name] = true
 
-		klog.V(3).Infof("Reclaimed <%v> for task <%s/%s> requested <%v>, and Node <%s> availableResources <%v>.", reclaimed, task.Namespace, task.Name, task.InitResreq, n.Name, availableResources)
-
-		if task.InitResreq.LessEqual(availableResources, api.Zero) {
-			if err := stmt.Pipeline(task, n.Name, evictionOccurred); err != nil {
-				klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>",
-					task.Namespace, task.Name, n.Name)
-				if rollbackErr := stmt.UnPipeline(task); rollbackErr != nil {
-					klog.Errorf("Failed to unpipeline Task %v on %v in Session %v for %v.",
-						task.UID, n.Name, ssn.UID, rollbackErr)
-				}
-			}
-			break
+		// If any eviction failed, discard all evictions for this node and try next
+		if evictionFailed {
+			klog.V(3).Infof("Eviction failed on Node <%s>, discarding all evictions and trying next node.", victimNode.Name)
+			nodeStmt.Discard()
+			continue
 		}
+
+		// Check if we have enough resources after all evictions
+		if !taskCanBePipelined {
+			klog.V(3).Infof("Not enough resources on Node <%s> after reclaiming (reclaimed: %v, available: %v, required: %v), discarding and trying next node.",
+				victimNode.Name, reclaimed, availableResources, task.InitResreq)
+			nodeStmt.Discard()
+			continue
+		}
+
+		// Try to pipeline the task to this node
+		if err := nodeStmt.Pipeline(task, victimNode.Name, evictionOccurred); err != nil {
+			klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>: %v",
+				task.Namespace, task.Name, victimNode.Name, err)
+			nodeStmt.Discard()
+			continue
+		}
+		mergedStmt := framework.SaveOperations(savedOriginalStmt, nodeStmt)
+		nodeStmt.Discard()
+
+		if err := stmt.RecoverOperations(mergedStmt); err != nil {
+			klog.Errorf("Failed to Save merged statements: %v", err)
+			// Try next node if merging fails
+			stmt.Discard()
+			if err := stmt.RecoverOperations(savedOriginalStmt); err != nil {
+				klog.Errorf("Failed to recover original statement operations: %v", err)
+				// This is a critical error, we cannot proceed
+				return
+			}
+			// We still have hope let's continue
+			continue
+		}
+		klog.V(3).Infof("Successfully reclaimed and pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
+			task.Namespace, task.Name, victimNode.Name, reclaimed)
+		return
 	}
+	klog.V(3).Infof("Failed to reclaim resources for Task <%s/%s> on any node.", task.Namespace, task.Name)
 }
 
 func (ra *Action) UnInitialize() {
