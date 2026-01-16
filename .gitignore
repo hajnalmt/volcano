@@ -152,3 +152,16 @@ benchmark/logs/
 
 # benchmark kubeconfig exported by kind
 benchmark/kubeconfig
+
+#### Agentic entries
+# Oh my opencode sisyphus agent work directory
+# https://github.com/code-yeongyu/oh-my-opencode
+.sisyphus/
+.sisyphus/*
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+.opencode/bun.lock
+
+# Codex local environment metadata
+.codex/
