@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/klog/v2"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
@@ -40,6 +41,10 @@ import (
 
 func TestMain(m *testing.M) {
 	options.Default()
+	// Change klog log level to new value
+	var logLevel klog.Level
+	logLevel.Set("5")
+
 	os.Exit(m.Run())
 }
 
@@ -620,6 +625,65 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 	p17 := util.BuildPod("ns1", "p17", "n3", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}, {Name: "rdma/hca", Value: "1"}}...), "pg17", make(map[string]string), map[string]string{})
 	p18 := util.BuildPod("ns1", "p18", "n3", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}, {Name: "rdma/hca", Value: "1"}}...), "pg18", map[string]string{schedulingv1beta1.PodPreemptable: "false"}, map[string]string{})
 
+	// resources for test case 13
+	arguments := framework.Arguments{
+		"parentBasedReclaimEnabled": true,
+	}
+	pluginsWithParentBasedReclaim := map[string]framework.PluginBuilder{
+		PluginName: func(args framework.Arguments) framework.Plugin {
+			return New(arguments)
+		},
+		predicates.PluginName: predicates.New,
+		gang.PluginName:       gang.New,
+	}
+	// node
+	n4 := util.BuildNode("n4", api.BuildResourceList("16", "16Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "4"}, {Name: "rdma/hca", Value: "1001"}, {Name: "pods", Value: "11"}}...), map[string]string{})
+
+	// queue
+	case13_queue1 := buildQueueWithParents("case13_queue1", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}}...), nil)
+	case13_queue11 := buildQueueWithParents("case13_queue11", "case13_queue1", nil, nil)
+	case13_queue2 := buildQueueWithParents("case13_queue2", "root", nil, nil)
+
+	// podgroup
+	pg19 := util.BuildPodGroup("pg19", "ns1", "case13_queue2", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg20 := util.BuildPodGroup("pg20", "ns1", "case13_queue11", 1, nil, schedulingv1beta1.PodGroupInqueue)
+
+	// pod
+	p19 := util.BuildPod("ns1", "p19", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "4"}, {Name: "rdma/hca", Value: "1"}}...), "pg19", make(map[string]string), map[string]string{})
+	p20 := util.BuildPod("ns1", "p20", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg20", make(map[string]string), map[string]string{})
+
+	// resources for test case 14 preemptable queue reclaim between projects
+	project1_root_queue := buildQueueWithParents("project1_root", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}}...), api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "2"}}...))
+	project1_non_preemptable_queue := buildQueueWithParents("project1_non-preemptable", "project1_root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}}...), api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}}...))
+	project1_preemptable := buildQueueWithParents("project1_preemptable", "project1_root", nil, nil)
+	project2_root_queue := buildQueueWithParents("project2_root", "root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "3"}}...), api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "4"}}...))
+	project2_non_preemptable_queue := buildQueueWithParents("project2_non-preemptable", "project2_root", api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "3"}}...), api.BuildResourceList("", "", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "3"}}...))
+	project2_preemptable_queue := buildQueueWithParents("project2_preemptable", "project2_root", nil, nil)
+
+	// podgroup
+	pg21 := util.BuildPodGroup("pg21", "ns1", "project2_preemptable", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg22 := util.BuildPodGroup("pg22", "ns1", "project2_preemptable", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg23 := util.BuildPodGroup("pg23", "ns1", "project2_preemptable", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg24 := util.BuildPodGroup("pg24", "ns1", "project2_preemptable", 1, nil, schedulingv1beta1.PodGroupRunning)
+	pg25 := util.BuildPodGroup("pg25", "ns1", "project1_preemptable", 1, nil, schedulingv1beta1.PodGroupPending)
+
+	// pod
+	priority1, priority2 := int32(1), int32(2)
+	p21 := util.BuildPodWithPriority("ns1", "p21", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg21", make(map[string]string), map[string]string{}, &priority2)
+	p22 := util.BuildPodWithPriority("ns1", "p22", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg22", make(map[string]string), map[string]string{}, &priority2)
+	p23 := util.BuildPodWithPriority("ns1", "p23", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg23", make(map[string]string), map[string]string{}, &priority2)
+	p24 := util.BuildPodWithPriority("ns1", "p24", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg24", make(map[string]string), map[string]string{}, &priority1)
+	p25 := util.BuildPod("ns1", "p25", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg25", make(map[string]string), map[string]string{})
+
+	// Test case after parent-based reclaim
+	pg24_reclaimed := util.BuildPodGroup("pg24_reclaimed", "ns1", "project2_preemptable", 1, nil, schedulingv1beta1.PodGroupInqueue)
+	pg25_pipelined := util.BuildPodGroup("pg25_pipelined", "ns1", "project1_preemptable", 1, nil, schedulingv1beta1.PodGroupRunning)
+	p24_reclaimed := util.BuildPod("ns1", "p24", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg24_reclaimed", make(map[string]string), map[string]string{})
+	p25_pipelined := util.BuildPod("ns1", "p25", "n4", corev1.PodRunning, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg25_pipelined", make(map[string]string), map[string]string{})
+	pg26 := util.BuildPodGroup("pg26", "ns1", "project2_non-preemptable", 1, nil, schedulingv1beta1.PodGroupPending)
+	p26 := util.BuildPod("ns1", "p26", "", corev1.PodPending, api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: "nvidia.com/a100", Value: "1"}, {Name: "rdma/hca", Value: "1"}}...), "pg26", make(map[string]string), map[string]string{})
+
+	// Test case
 	tests := []uthelper.TestCommonStruct{
 		{
 			Name:      "case0: Pod allocatable when queue is leaf queue",
@@ -762,6 +826,45 @@ func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
 				"ns1/pg16": {"n3"},
 			},
 			ExpectEvicted:  []string{"ns1/p17"},
+			ExpectEvictNum: 1,
+		},
+		{
+			Name:      "case13: Can reclaim based on parent deserved when parentBasedReclaimEnabled is true",
+			Plugins:   pluginsWithParentBasedReclaim,
+			Pods:      []*corev1.Pod{p19, p20},
+			Nodes:     []*corev1.Node{n4},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg19, pg20},
+			Queues:    []*schedulingv1beta1.Queue{root2, case13_queue1, case13_queue11, case13_queue2},
+			ExpectPipeLined: map[string][]string{
+				"ns1/pg20": {"n4"},
+			},
+			ExpectEvicted:  []string{"ns1/p19"},
+			ExpectEvictNum: 1,
+		},
+		{
+			Name:      "case14: Can reclaim when cluster is full and parentBasedReclaimEnabled is true",
+			Plugins:   pluginsWithParentBasedReclaim,
+			Pods:      []*corev1.Pod{p21, p22, p23, p24, p25},
+			Nodes:     []*corev1.Node{n4},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg21, pg22, pg23, pg24, pg25},
+			Queues:    []*schedulingv1beta1.Queue{root2, project1_root_queue, project1_non_preemptable_queue, project1_preemptable, project2_root_queue, project2_non_preemptable_queue, project2_preemptable_queue},
+			ExpectPipeLined: map[string][]string{
+				"ns1/pg25": {"n4"},
+			},
+			ExpectEvicted:  []string{"ns1/p24"},
+			ExpectEvictNum: 1,
+		},
+		{
+			Name:      "case15: Can reclaim in non-preemptable queue when cluster is full and parentBasedReclaimEnabled is true",
+			Plugins:   pluginsWithParentBasedReclaim,
+			Pods:      []*corev1.Pod{p21, p22, p23, p24_reclaimed, p25_pipelined, p26},
+			Nodes:     []*corev1.Node{n4},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg21, pg22, pg23, pg24_reclaimed, pg25_pipelined, pg26},
+			Queues:    []*schedulingv1beta1.Queue{root2, project1_root_queue, project1_non_preemptable_queue, project1_preemptable, project2_root_queue, project2_non_preemptable_queue, project2_preemptable_queue},
+			ExpectPipeLined: map[string][]string{
+				"ns1/pg26": {"n4"},
+			},
+			ExpectEvicted:  []string{"ns1/p23"},
 			ExpectEvictNum: 1,
 		},
 	}
