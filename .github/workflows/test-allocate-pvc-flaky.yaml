@@ -1,0 +1,154 @@
+name: Test Allocate PVC Flakiness Detection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-flaky:
+    name: ${{ matrix.config.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "race-gomaxprocs-1"
+            race: true
+            gomaxprocs: 1
+            iterations: 50
+          - name: "race-gomaxprocs-4"
+            race: true
+            gomaxprocs: 4
+            iterations: 50
+          - name: "race-gomaxprocs-8"
+            race: true
+            gomaxprocs: 8
+            iterations: 50
+          - name: "no-race-gomaxprocs-1"
+            race: false
+            gomaxprocs: 1
+            iterations: 50
+          - name: "no-race-gomaxprocs-4"
+            race: false
+            gomaxprocs: 4
+            iterations: 50
+          - name: "serial-baseline-100"
+            race: false
+            gomaxprocs: 0
+            iterations: 100
+    
+    env:
+      GOPATH: /home/runner/work/${{ github.repository }}
+    
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.x
+      
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          path: ./src/github.com/${{ github.repository }}
+      
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      
+      - name: Run TestAllocateWithPVC (with race)
+        if: matrix.config.race == true
+        working-directory: ./src/github.com/${{ github.repository }}
+        run: |
+          echo "=== Test Configuration ==="
+          echo "Configuration: ${{ matrix.config.name }}"
+          echo "Race Detector: enabled"
+          
+          if [ "${{ matrix.config.gomaxprocs }}" -gt 0 ]; then
+            export GOMAXPROCS=${{ matrix.config.gomaxprocs }}
+            echo "GOMAXPROCS: $GOMAXPROCS"
+          else
+            echo "GOMAXPROCS: unset (system default)"
+          fi
+          
+          echo "Iterations: ${{ matrix.config.iterations }}"
+          echo ""
+
+          TEST_CMD=(go test -v -race -count=${{ matrix.config.iterations }}  -timeout=15m -run='^TestAllocateWithPVC/static_pv_matched_and_node_with_enough_resources$' ./pkg/scheduler/actions/allocate)
+          echo "=== Executing Command ==="
+          echo "${TEST_CMD[@]}"
+          echo ""
+          "${TEST_CMD[@]}" 2>&1 | tee test-output.log
+      
+      - name: Run TestAllocateWithPVC (without race)
+        if: matrix.config.race == false
+        working-directory: ./src/github.com/${{ github.repository }}
+        run: |
+          echo "=== Test Configuration ==="
+          echo "Configuration: ${{ matrix.config.name }}"
+          echo "Race Detector: disabled"
+          
+          if [ "${{ matrix.config.gomaxprocs }}" -gt 0 ]; then
+            export GOMAXPROCS=${{ matrix.config.gomaxprocs }}
+            echo "GOMAXPROCS: $GOMAXPROCS"
+          else
+            echo "GOMAXPROCS: unset (system default)"
+          fi
+          
+          echo "Iterations: ${{ matrix.config.iterations }}"
+          echo ""
+
+          TEST_CMD=(go test -v -count=${{ matrix.config.iterations }} -timeout=15m -run='^TestAllocateWithPVC/static_pv_matched_and_node_with_enough_resources$' ./pkg/scheduler/actions/allocate)
+          echo "=== Executing Command ==="
+          echo "${TEST_CMD[@]}"
+          echo ""
+          "${TEST_CMD[@]}" 2>&1 | tee test-output.log
+                
+      - name: Analyze Results
+        if: always()
+        working-directory: ./src/github.com/${{ github.repository }}
+        run: |
+          echo "=== Test Execution Summary ==="
+          echo "Configuration: ${{ matrix.config.name }}"
+          if [ "${{ matrix.config.gomaxprocs }}" -gt 0 ]; then
+            echo "GOMAXPROCS: ${{ matrix.config.gomaxprocs }}"
+          else
+            echo "GOMAXPROCS: unset (system default), nproc: $(nproc)"
+          fi
+          echo "Race Detector: ${{ matrix.config.race }}"
+          echo ""
+          
+          if [ -f test-output.log ]; then
+            TOTAL=$(grep -cF -- "=== RUN   TestAllocateWithPVC/static_pv_matched_and_node_with_enough_resources" test-output.log || true)
+            PASS=$(grep -cF -- "--- PASS: TestAllocateWithPVC/static_pv_matched_and_node_with_enough_resources" test-output.log || true)
+            FAIL=$(grep -cF -- "--- FAIL: TestAllocateWithPVC/static_pv_matched_and_node_with_enough_resources" test-output.log || true)
+            RACES=$(grep -cF -- "WARNING: DATA RACE" test-output.log || true)
+            
+            echo "Total runs: $TOTAL"
+            echo "Passed: $PASS"
+            echo "Failed: $FAIL"
+            echo "Race conditions detected: $RACES"
+            echo ""
+
+            # Fail the job if there were failures or races
+            if [ "$FAIL" -gt 0 ] 2>/dev/null || [ "$RACES" -gt 0 ] 2>/dev/null; then
+              echo "WORKFLOW FAILED: Detected $FAIL test failure(s) and $RACES race condition(s)"
+              exit 1
+            fi
+          else
+            echo "ERROR: test-output.log not found"
+          fi
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.config.name }}
+          path: ./src/github.com/${{ github.repository }}/test-output.log
+          retention-days: 30
