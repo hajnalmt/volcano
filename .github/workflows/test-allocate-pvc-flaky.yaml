@@ -1,0 +1,125 @@
+name: Test Allocate PVC Flakiness Detection
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of iterations per configuration'
+        required: false
+        default: '50'
+
+jobs:
+  test-flaky:
+    name: ${{ matrix.config.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "race-gomaxprocs-1"
+            race: true
+            gomaxprocs: 1
+          - name: "race-gomaxprocs-4"
+            race: true
+            gomaxprocs: 4
+          - name: "race-gomaxprocs-8"
+            race: true
+            gomaxprocs: 8
+          - name: "no-race-gomaxprocs-1"
+            race: false
+            gomaxprocs: 1
+          - name: "no-race-gomaxprocs-4"
+            race: false
+            gomaxprocs: 4
+    
+    env:
+      GOPATH: /home/runner/work/${{ github.repository }}
+      GOMAXPROCS: ${{ matrix.config.gomaxprocs }}
+    
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.x
+      
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          path: ./src/github.com/${{ github.repository }}
+      
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+      
+      - name: Run TestAllocateWithPVC (with race)
+        if: matrix.config.race == true
+        working-directory: ./src/github.com/${{ github.repository }}
+        run: |
+          echo "Running with -race, GOMAXPROCS=${{ matrix.config.gomaxprocs }}"
+          echo "Iterations: ${{ github.event.inputs.iterations || '50' }}"
+          
+          go test -v -race -count=${{ github.event.inputs.iterations || '50' }} \
+            -timeout=20m \
+            -run='^TestAllocateWithPVC$' \
+            ./pkg/scheduler/actions/allocate/... \
+            2>&1 | tee test-output.log
+      
+      - name: Run TestAllocateWithPVC (without race)
+        if: matrix.config.race == false
+        working-directory: ./src/github.com/${{ github.repository }}
+        run: |
+          echo "Running without race, GOMAXPROCS=${{ matrix.config.gomaxprocs }}"
+          echo "Iterations: ${{ github.event.inputs.iterations || '50' }}"
+          
+          go test -v -count=${{ github.event.inputs.iterations || '50' }} \
+            -timeout=15m \
+            -run='^TestAllocateWithPVC$' \
+            ./pkg/scheduler/actions/allocate/... \
+            2>&1 | tee test-output.log
+      
+      - name: Analyze Results
+        if: always()
+        working-directory: ./src/github.com/${{ github.repository }}
+        run: |
+          echo "=== Test Execution Summary ==="
+          echo "Configuration: ${{ matrix.config.name }}"
+          echo "GOMAXPROCS: ${{ matrix.config.gomaxprocs }}"
+          echo "Race Detector: ${{ matrix.config.race }}"
+          echo ""
+          
+          if [ -f test-output.log ]; then
+            TOTAL=$(grep -c "=== RUN   TestAllocateWithPVC" test-output.log || echo "0")
+            PASS=$(grep -c "--- PASS: TestAllocateWithPVC" test-output.log || echo "0")
+            FAIL=$(grep -c "--- FAIL: TestAllocateWithPVC" test-output.log || echo "0")
+            RACES=$(grep -c "WARNING: DATA RACE" test-output.log || echo "0")
+            
+            echo "Total runs: $TOTAL"
+            echo "Passed: $PASS"
+            echo "Failed: $FAIL"
+            echo "Race conditions detected: $RACES"
+            echo ""
+            
+            if [ "$FAIL" -gt 0 ]; then
+              echo "=== Failure Details ==="
+              grep -A 20 "--- FAIL: TestAllocateWithPVC" test-output.log || true
+            fi
+            
+            if [ "$RACES" -gt 0 ]; then
+              echo "=== Race Condition Details ==="
+              grep -A 30 "WARNING: DATA RACE" test-output.log || true
+            fi
+          else
+            echo "ERROR: test-output.log not found"
+          fi
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.config.name }}
+          path: ./src/github.com/${{ github.repository }}/test-output.log
+          retention-days: 30
