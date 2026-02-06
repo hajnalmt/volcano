@@ -145,8 +145,8 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					klog.V(3).Infof("Task %s/%s cannot preempt (policy Never)", task.Namespace, task.Name)
 					continue
 				}
-
-				if !ssn.Preemptive(queue, task) {
+				var dims *api.ResourceNameList
+				if ok, dims = ssn.Preemptive(queue, task); !ok {
 					klog.V(3).Infof("Queue <%s> cannot reclaim for task <%s>, skip", queue.Name, task.Name)
 					continue
 				}
@@ -156,7 +156,7 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				ra.reclaimForTask(ssn, stmt, task, job)
+				ra.reclaimForTask(ssn, stmt, task, dims, job)
 			}
 
 			if ssn.JobPipelined(job) {
@@ -172,6 +172,12 @@ func (ra *Action) Execute(ssn *framework.Session) {
 	}
 }
 
+// nodeBucket represents a bucket of nodes grouped by dimension match count
+type nodeBucket struct {
+	matchCount int
+	nodes      []*api.NodeInfo
+}
+
 // nodeVictimsInfo holds the reclaim information for a single node.
 type nodeVictimsInfo struct {
 	node               *api.NodeInfo
@@ -180,7 +186,13 @@ type nodeVictimsInfo struct {
 	availableResources *api.Resource
 }
 
-func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, job *api.JobInfo) {
+// nodeBuckets holds priority queues of nodes grouped by dimension match count
+type nodeBuckets struct {
+	buckets       map[int]*util.PriorityQueue
+	maxMatchCount int
+}
+
+func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, dims *api.ResourceNameList, job *api.JobInfo) {
 	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
 	predicateHelper := util.NewPredicateHelper()
 	predicateNodes, _ := predicateHelper.PredicateNodes(task, totalNodes, ssn.PredicateForPreemptAction, ra.enablePredicateErrorCache, ssn.NodesInShard)
@@ -189,6 +201,9 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 	for _, nodes := range predicateNodesByShard {
 		predicateNodesByShardFlattened = append(predicateNodesByShardFlattened, nodes...)
 	}
+
+	// Prioritize nodes by dimension match into buckets
+	nodeBuckets := ra.prioritizeNodesByDimensionMatch(predicateNodesByShardFlattened, dims, task)
 
 	// Create the global allVictims priority queue using the same ordering as per-node queues
 	allVictims := ssn.BuildAumovioVictimPriorityQueue(nil, task)
@@ -363,4 +378,94 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 }
 
 func (ra *Action) UnInitialize() {
+}
+
+// prioritizeNodesByDimensionMatch creates buckets of nodes based on dimension matching.
+// Within each bucket, nodes are sorted by their resource availability in those dimensions.
+// Returns a nodeBuckets struct containing priority queues ordered by match count.
+func (ra *Action) prioritizeNodesByDimensionMatch(nodes []*api.NodeInfo, dims *api.ResourceNameList, task *api.TaskInfo) *nodeBuckets {
+	buckets := &nodeBuckets{
+		buckets:       make(map[int]*util.PriorityQueue),
+		maxMatchCount: 0,
+	}
+
+	if dims == nil || len(*dims) == 0 {
+		// Create a single bucket with all nodes
+		buckets.buckets[0] = util.NewPriorityQueue(func(l, r interface{}) bool { return true })
+		for _, node := range nodes {
+			buckets.buckets[0].Push(node)
+		}
+		return buckets
+	}
+
+	// Create a LessFn that prioritizes nodes with more resources in the specified dimensions
+	nodeScoreLessFn := func(l, r interface{}) bool {
+		ln := l.(*api.NodeInfo)
+		rn := r.(*api.NodeInfo)
+
+		// Calculate total available resources in the specified dimensions
+		lScore := 0.0
+		rScore := 0.0
+
+		for _, dimName := range *dims {
+			lScore += ln.FutureIdle().Get(dimName)
+			rScore += rn.FutureIdle().Get(dimName)
+		}
+
+		// Higher score should come first (return true if l has higher score)
+		return lScore > rScore
+	}
+
+	// Create a deficit-based LessFn for the zero-match bucket
+	deficitLessFn := func(l, r interface{}) bool {
+		ln := l.(*api.NodeInfo)
+		rn := r.(*api.NodeInfo)
+
+		// Calculate deficit: how much more resource is needed to fit the task
+		lDeficit := api.ExceededPart(task.InitResreq, ln.FutureIdle())
+		rDeficit := api.ExceededPart(task.InitResreq, rn.FutureIdle())
+
+		// Compare total deficit - we want the smallest deficit first
+		lTotal := lDeficit.MilliCPU + lDeficit.Memory
+		rTotal := rDeficit.MilliCPU + rDeficit.Memory
+
+		for _, v := range lDeficit.ScalarResources {
+			lTotal += v
+		}
+		for _, v := range rDeficit.ScalarResources {
+			rTotal += v
+		}
+
+		return lTotal < rTotal
+	}
+
+	for _, node := range nodes {
+		futureIdle := node.FutureIdle()
+		matchCount := 0
+
+		// Count how many dimensions from dims are present in FutureIdle
+		for _, dimName := range *dims {
+			if quantity := futureIdle.Get(dimName); quantity > api.GetMinResource() {
+				matchCount++
+			}
+		}
+
+		// Add node to appropriate bucket
+		if _, exists := buckets.buckets[matchCount]; !exists {
+			// Use deficit-based ordering for zero-match bucket, score-based for others
+			if matchCount == 0 {
+				buckets.buckets[matchCount] = util.NewPriorityQueue(deficitLessFn)
+			} else {
+				buckets.buckets[matchCount] = util.NewPriorityQueue(nodeScoreLessFn)
+			}
+		}
+
+		buckets.buckets[matchCount].Push(node)
+
+		if matchCount > buckets.maxMatchCount {
+			buckets.maxMatchCount = matchCount
+		}
+	}
+
+	return buckets
 }

@@ -354,10 +354,10 @@ func (pp *proportionPlugin) OnSessionOpen(ssn *framework.Session) {
 		return allocatable
 	})
 
-	ssn.AddPreemptiveFn(pp.Name(), func(obj interface{}, candidate interface{}) bool {
+	ssn.AddPreemptiveFn(pp.Name(), func(obj interface{}, candidate interface{}) (bool, *api.ResourceNameList) {
 		queue := obj.(*api.QueueInfo)
 		task := candidate.(*api.TaskInfo)
-		return queueAllocatable(queue, task)
+		return queueAllocatable(queue, task), &api.ResourceNameList{}
 	})
 
 	ssn.AddPrePredicateFn(pp.Name(), func(task *api.TaskInfo) error {

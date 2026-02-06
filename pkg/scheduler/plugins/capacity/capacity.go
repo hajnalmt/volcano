@@ -229,10 +229,11 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 		return victims, util.Permit
 	})
 
-	ssn.AddPreemptiveFn(cp.Name(), func(obj interface{}, candidate interface{}) bool {
+	ssn.AddPreemptiveFn(cp.Name(), func(obj interface{}, candidate interface{}) (bool, *api.ResourceNameList) {
+		resourceNames := api.ResourceNameList{}
 		if !readyToSchedule {
 			klog.V(3).Infof("Capacity plugin failed to check queue's hierarchical structure!")
-			return false
+			return false, &resourceNames
 		}
 
 		queue := obj.(*api.QueueInfo)
@@ -240,18 +241,19 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 		if queue.Queue.Status.State != scheduling.QueueStateOpen {
 			klog.V(3).Infof("Queue <%s> current state: %s, is not open state, can not reclaim for <%s>.",
 				queue.Name, queue.Queue.Status.State, task.Name)
-			return false
+			return false, &resourceNames
 		}
 
 		attr := cp.queueOpts[queue.UID]
 		futureUsed := attr.allocated.Clone().Add(task.Resreq)
 
 		// If there is a single dimension whose deserved is greater than allocated, current task can reclaim by preempt others.
-		isPreemptive, resourceNames := futureUsed.LessEqualPartlyWithDimensionZeroFiltered(attr.deserved, task.Resreq)
+		isPreemptive, resourceNamesString := futureUsed.LessEqualPartlyWithDimensionZeroFiltered(attr.deserved, task.Resreq)
+		resourceNames = api.ParseResourceNameListFromString(resourceNamesString)
 		if isPreemptive {
-			klog.V(3).Infof("Queue <%v> can reclaim on resource dimensions: %v. "+
+			klog.V(3).Infof("Queue <%v> can reclaim on resource dimensions: %s. "+
 				"The futureUsed: %v, deserved: %v, allocated: %v, task requested: %v",
-				queue.Name, resourceNames, futureUsed, attr.deserved, attr.allocated, task.Resreq)
+				queue.Name, resourceNames.String(), futureUsed, attr.deserved, attr.allocated, task.Resreq)
 		} else {
 			klog.V(4).Infof("Queue <%v> itself can not reclaim, futureUsed: %v, deserved: %v, requested: %v",
 				queue.Name, futureUsed, attr.deserved, task.Resreq)
@@ -259,11 +261,12 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			if parentBasedReclaimEnabled && attr.parentQueueID != "" && attr.parentQueueID != rootQueueID {
 				parentAttr := cp.queueOpts[attr.parentQueueID]
 				futureUsedParent := parentAttr.allocated.Clone().Add(task.Resreq)
-				isPreemptive, resourceNames = futureUsedParent.LessEqualPartlyWithDimensionZeroFiltered(parentAttr.deserved, task.Resreq)
+				isPreemptive, resourceNamesString := futureUsedParent.LessEqualPartlyWithDimensionZeroFiltered(parentAttr.deserved, task.Resreq)
+				resourceNames = api.ParseResourceNameListFromString(resourceNamesString)
 				if isPreemptive {
-					klog.V(3).Infof("Queue's parent <%v> can reclaim on resource dimensions: %v. "+
+					klog.V(3).Infof("Queue's parent <%v> can reclaim on resource dimensions: %s. "+
 						"The futureUsedParent: %v, deserved: %v, allocated: %v, task requested: %v",
-						parentAttr.name, resourceNames, futureUsedParent, parentAttr.deserved, parentAttr.allocated, task.Resreq)
+						parentAttr.name, resourceNames.String(), futureUsedParent, parentAttr.deserved, parentAttr.allocated, task.Resreq)
 				} else {
 					klog.V(4).Infof("Queue <%v> and its parent <%v> can not reclaim. "+
 						"The futureUsedParent: %v, parentDeserved: %v, requested: %v",
@@ -283,7 +286,7 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 
 		// PreemptiveFn is the opposite of OverusedFn, as long as there is a one-dimensional
 		// resource whose deserved is greater than allocated, current task can reclaim by preempt others.
-		return isPreemptive
+		return isPreemptive, &resourceNames
 	})
 
 	ssn.AddAllocatableFn(cp.Name(), func(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
@@ -801,15 +804,40 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 		lt := l.(*api.TaskInfo)
 		rt := r.(*api.TaskInfo)
 		pt := preemptor.(*api.TaskInfo)
-		lPtIntersection := api.Intersection(lt.Resreq, pt.Resreq)
-		rPtIntersection := api.Intersection(rt.Resreq, pt.Resreq)
+		ltRns := lt.Resreq.ResourceNames().FilteredIgnoredScalarResources()
+		rtRns := rt.Resreq.ResourceNames().FilteredIgnoredScalarResources()
+		ptRns := pt.Resreq.ResourceNames().FilteredIgnoredScalarResources()
+		ltHasOnlyCPUMemory := ltRns.HasOnlyCPUMemory()
+		rtHasOnlyCPUMemory := rtRns.HasOnlyCPUMemory()
+
+		// Prioritize tasks that only consume CPU and memory
+		if ltHasOnlyCPUMemory && rtHasOnlyCPUMemory {
+			return 0
+		} else if ltHasOnlyCPUMemory {
+			return -1
+		} else if rtHasOnlyCPUMemory {
+			return 1
+		}
+
+		lMatchesPt := ptRns.Equals(ltRns)
+		rMatchesPt := ptRns.Equals(rtRns)
+
+		if lMatchesPt && rMatchesPt {
+			return 0
+		} else if lMatchesPt {
+			return -1
+		} else if rMatchesPt {
+			return 1
+		}
+
+		lPtIntersection := api.IntersectionWithIgnoredScalarResources(lt.Resreq, pt.Resreq)
+		rPtIntersection := api.IntersectionWithIgnoredScalarResources(rt.Resreq, pt.Resreq)
 
 		if len(lPtIntersection) == len(rPtIntersection) {
 			return 0
 		} else if len(lPtIntersection) > len(rPtIntersection) {
 			return -1
 		}
-
 		return 1
 	})
 	return true
@@ -969,20 +997,58 @@ func (cp *capacityPlugin) checkHierarchicalQueue(attr *queueAttr) {
 
 // compareShareWithDeserved compares two queueAttr by share; when shares are equal,
 // queues with non-empty deserved are prioritized over best-effort queues.
+// When both queues have empty deserved and parentBasedReclaim is enabled,
+// parent deserved resources are considered in the comparison.
 // Returns negative if l should come before r.
 func (cp *capacityPlugin) compareShareWithDeserved(lattr, rattr *queueAttr) int {
 	if lattr.share == rattr.share {
 		lHasDeserved := !lattr.deserved.IsEmpty()
 		rHasDeserved := !rattr.deserved.IsEmpty()
+
+		// If both have deserved or both don't have deserved, they are equal at this level
 		if lHasDeserved == rHasDeserved {
+			// When parentBasedReclaim is enabled and both queues have empty deserved,
+			// check parent deserved resources for tie-breaking
+			if cp.parentBasedReclaimEnabled && !lHasDeserved && !rHasDeserved {
+				// Both queues are best-effort (no deserved), check parents
+				if lattr.parentQueueID != "" && lattr.parentQueueID != rootQueueID &&
+					rattr.parentQueueID != "" && rattr.parentQueueID != rootQueueID {
+					lParentAttr := cp.queueOpts[lattr.parentQueueID]
+					rParentAttr := cp.queueOpts[rattr.parentQueueID]
+
+					lParentHasDeserved := !lParentAttr.deserved.IsEmpty()
+					rParentHasDeserved := !rParentAttr.deserved.IsEmpty()
+
+					// If both parents have deserved, compare by parent share
+					if lParentHasDeserved && rParentHasDeserved {
+						// If they share the same parent, compare by parent share
+						if lattr.parentQueueID == rattr.parentQueueID {
+							// Same parent, same share - they are equal
+							return 0
+						}
+						// Different parents, both have deserved - compare parent shares
+						if lParentAttr.share < rParentAttr.share {
+							return -1
+						}
+						if lParentAttr.share > rParentAttr.share {
+							return 1
+						}
+						// Parent shares are equal, they are equal at this level
+						return 0
+					}
+				}
+			}
 			return 0
 		}
+
+		// Prioritize queue with deserved over best-effort queue
 		if lHasDeserved {
 			return -1
 		}
 		return 1
 	}
 
+	// Compare by share
 	if lattr.share < rattr.share {
 		return -1
 	}

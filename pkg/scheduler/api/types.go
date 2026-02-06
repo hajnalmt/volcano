@@ -134,7 +134,7 @@ type VictimTaskCompareFn func(interface{}, interface{}, interface{}) int
 type ValidateFn func(interface{}) bool
 
 // ValidateWithCandidateFn behaves like ValidateFn but take the candidate task into consideration.
-type ValidateWithCandidateFn func(interface{}, interface{}) bool
+type ValidateWithCandidateFn func(interface{}, interface{}) (bool, *ResourceNameList)
 
 // ValidateResult is struct to which can used to determine the result
 type ValidateResult struct {
