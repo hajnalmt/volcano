@@ -1033,6 +1033,39 @@ func (r ResourceNameList) Contains(rr ResourceNameList) bool {
 	return true
 }
 
+// Equals check whether r and rr are equal
+func (r ResourceNameList) Equals(rr ResourceNameList) bool {
+	if len(r) != len(rr) {
+		return false
+	}
+	return r.Contains(rr)
+}
+
+func (r ResourceNameList) String() string {
+	strList := make([]string, len(r))
+	for i, name := range r {
+		strList[i] = string(name)
+	}
+	return fmt.Sprintf("[%s]", strings.Join(strList, ", "))
+}
+
+func (r ResourceNameList) Len() int {
+	return len(r)
+}
+
+func ParseResourceNameList(resourceNames []v1.ResourceName) ResourceNameList {
+	return ResourceNameList(resourceNames)
+}
+
+func ParseResourceNameListFromString(resourceNames []string) ResourceNameList {
+	rnList := make([]v1.ResourceName, len(resourceNames))
+	for i, name := range resourceNames {
+		rnList[i] = v1.ResourceName(name)
+	}
+	return ResourceNameList(rnList)
+}
+
+// IsCountQuota checks if the resource name is a count quota
 func IsCountQuota(name v1.ResourceName) bool {
 	return strings.HasPrefix(string(name), "count/")
 }
@@ -1074,4 +1107,8 @@ func ExceededPart(left, right *Resource) *Resource {
 
 	diff, _ := left.Diff(right, Zero)
 	return diff
+}
+
+func (r ResourceNameList) HasOnlyCPUMemory() bool {
+	return r.Equals(ResourceNameList{v1.ResourceCPU, v1.ResourceMemory})
 }
