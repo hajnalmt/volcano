@@ -23,6 +23,7 @@ package framework
 import (
 	"context"
 
+	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
@@ -332,7 +333,8 @@ func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 }
 
 // Preemptive invoke can preemptive function of the plugins
-func (ssn *Session) Preemptive(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
+func (ssn *Session) Preemptive(queue *api.QueueInfo, candidate *api.TaskInfo) (bool, *api.ResourceNameList) {
+	resourceNameList := &api.ResourceNameList{}
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			of, found := ssn.preemptiveFns[plugin.Name]
@@ -342,13 +344,14 @@ func (ssn *Session) Preemptive(queue *api.QueueInfo, candidate *api.TaskInfo) bo
 			if !found {
 				continue
 			}
-			if !of(queue, candidate) {
-				return false
+			if ok, resourceNameList := of(queue, candidate); !ok {
+				return false, resourceNameList
 			}
 		}
 	}
-
-	return true
+	klog.V(3).Infof("Task <%v/%v> in queue <%v> is preemptive on resource dimensions: %s",
+		candidate.Namespace, candidate.Name, queue.Name, resourceNameList.String())
+	return true, resourceNameList
 }
 
 // Allocatable invoke allocatable function of the plugins
@@ -755,56 +758,42 @@ func (ssn *Session) VictimQueueOrderFn(l, r, preemptor interface{}) bool {
 
 // VictimTaskOrderFn invoke victimtaskorder function of the plugins
 func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool {
+	lv := l.(*api.TaskInfo)
+	rv := r.(*api.TaskInfo)
+	preemptorv := preemptor.(*api.TaskInfo)
+	// Order by VictimQueueOrderFn
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			qof, found := ssn.victimQueueOrderFns[plugin.Name]
 			if !found {
 				continue
 			}
-			lv := l.(*api.TaskInfo)
-			rv := r.(*api.TaskInfo)
-			preemptor := preemptor.(*api.TaskInfo)
 			lvJob, lvJobFound := ssn.Jobs[lv.Job]
 			rvJob, rvJobFound := ssn.Jobs[rv.Job]
-			preemptorJob, preemptorJobFound := ssn.Jobs[preemptor.Job]
+			preemptorJob, preemptorJobFound := ssn.Jobs[preemptorv.Job]
 
 			if lvJobFound && rvJobFound && preemptorJobFound && lvJob.Queue != rvJob.Queue {
-				if j := qof(lvJob, rvJob, preemptorJob); j != 0 {
+				if j := qof(ssn.Queues[lvJob.Queue], ssn.Queues[rvJob.Queue], ssn.Queues[preemptorJob.Queue]); j != 0 {
 					return j < 0
 				}
 			}
 		}
 	}
-	for _, tier := range ssn.Tiers {
-		for _, plugin := range tier.Plugins {
-			if !isEnabled(plugin.EnabledTaskOrder) {
-				continue
-			}
-			tof, found := ssn.taskOrderFns[plugin.Name]
-			if !found {
-				continue
-			}
-			if j := tof(l, r); j != 0 {
-				return j < 0
-			}
-		}
-	}
+
+	// Order by VictimTaskOrderFn
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			vtof, found := ssn.victimTaskOrderFns[plugin.Name]
 			if !found {
 				continue
 			}
-			if j := vtof(l, r, preemptor); j != 0 {
-				return j < 0
+			if j := vtof(lv, rv, preemptorv); j != 0 {
+				return j > 0
 			}
 		}
 	}
 
-	// If no task order funcs, order task by default func.
-	lv := l.(*api.TaskInfo)
-	rv := r.(*api.TaskInfo)
-	return helpers.CompareTask(lv, rv)
+	return !ssn.TaskOrderFn(lv, rv)
 }
 
 // TaskCompareFns invoke taskorder function of the plugins
