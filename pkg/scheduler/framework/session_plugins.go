@@ -757,7 +757,7 @@ func (ssn *Session) VictimQueueOrderFn(l, r, preemptor interface{}) bool {
 }
 
 // VictimTaskOrderFn invoke victimtaskorder function of the plugins
-func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool {
+func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor, matchCount interface{}) bool {
 	lv := l.(*api.TaskInfo)
 	rv := r.(*api.TaskInfo)
 	preemptorv := preemptor.(*api.TaskInfo)
@@ -787,7 +787,7 @@ func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool 
 			if !found {
 				continue
 			}
-			if j := vtof(lv, rv, preemptorv); j != 0 {
+			if j := vtof(lv, rv, preemptorv, matchCount); j != 0 {
 				return j > 0
 			}
 		}
@@ -1176,11 +1176,11 @@ func (ssn *Session) BuildVictimsPriorityQueue(victims []*api.TaskInfo, preemptor
 // BuildVictimsPriorityQueue returns a priority queue with victims sorted by:
 // if victims has same job id, sorted by !ssn.TaskOrderFn
 // if victims has different job id, sorted by !ssn.JobOrderFn
-func (ssn *Session) BuildAumovioVictimPriorityQueue(victims []*api.TaskInfo, preemptor *api.TaskInfo) *util.PriorityQueue {
+func (ssn *Session) BuildAumovioVictimPriorityQueue(victims []*api.TaskInfo, preemptor *api.TaskInfo, matchCount int) *util.PriorityQueue {
 	victimsQueue := util.NewPriorityQueue(func(l, r interface{}) bool {
 		lv := l.(*api.TaskInfo)
 		rv := r.(*api.TaskInfo)
-		return ssn.VictimQueueAndTaskOrderFn(lv, rv, preemptor)
+		return ssn.VictimQueueAndTaskOrderFn(lv, rv, preemptor, matchCount)
 	})
 	for _, victim := range victims {
 		victimsQueue.Push(victim)

@@ -254,6 +254,7 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			klog.V(3).Infof("Queue <%v> can reclaim on resource dimensions: %s. "+
 				"The futureUsed: %v, deserved: %v, allocated: %v, task requested: %v",
 				queue.Name, resourceNames.String(), futureUsed, attr.deserved, attr.allocated, task.Resreq)
+			return true, &resourceNames
 		} else {
 			klog.V(4).Infof("Queue <%v> itself can not reclaim, futureUsed: %v, deserved: %v, requested: %v",
 				queue.Name, futureUsed, attr.deserved, task.Resreq)
@@ -261,12 +262,13 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			if parentBasedReclaimEnabled && attr.parentQueueID != "" && attr.parentQueueID != rootQueueID {
 				parentAttr := cp.queueOpts[attr.parentQueueID]
 				futureUsedParent := parentAttr.allocated.Clone().Add(task.Resreq)
-				isPreemptive, resourceNamesString := futureUsedParent.LessEqualPartlyWithDimensionZeroFiltered(parentAttr.deserved, task.Resreq)
-				resourceNames = api.ParseResourceNameListFromString(resourceNamesString)
-				if isPreemptive {
+				isPreemptiveParent, resourceNamesStringParent := futureUsedParent.LessEqualPartlyWithDimensionZeroFiltered(parentAttr.deserved, task.Resreq)
+				resourceNamesParent := api.ParseResourceNameListFromString(resourceNamesStringParent)
+				if isPreemptiveParent {
 					klog.V(3).Infof("Queue's parent <%v> can reclaim on resource dimensions: %s. "+
 						"The futureUsedParent: %v, deserved: %v, allocated: %v, task requested: %v",
-						parentAttr.name, resourceNames.String(), futureUsedParent, parentAttr.deserved, parentAttr.allocated, task.Resreq)
+						parentAttr.name, resourceNamesParent.String(), futureUsedParent, parentAttr.deserved, parentAttr.allocated, task.Resreq)
+					return true, &resourceNamesParent
 				} else {
 					klog.V(4).Infof("Queue <%v> and its parent <%v> can not reclaim. "+
 						"The futureUsedParent: %v, parentDeserved: %v, requested: %v",
@@ -286,7 +288,7 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 
 		// PreemptiveFn is the opposite of OverusedFn, as long as there is a one-dimensional
 		// resource whose deserved is greater than allocated, current task can reclaim by preempt others.
-		return isPreemptive, &resourceNames
+		return false, &resourceNames
 	})
 
 	ssn.AddAllocatableFn(cp.Name(), func(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
@@ -800,34 +802,58 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 		return 1
 	})
 
-	ssn.AddVictimTaskOrderFn(cp.Name(), func(l, r, preemptor interface{}) int {
+	ssn.AddVictimTaskOrderFn(cp.Name(), func(l, r, preemptor, matchCount interface{}) int {
 		lt := l.(*api.TaskInfo)
 		rt := r.(*api.TaskInfo)
 		pt := preemptor.(*api.TaskInfo)
+		mC := matchCount.(int)
 		ltRns := lt.Resreq.ResourceNames().FilteredIgnoredScalarResources()
 		rtRns := rt.Resreq.ResourceNames().FilteredIgnoredScalarResources()
 		ptRns := pt.Resreq.ResourceNames().FilteredIgnoredScalarResources()
 		ltHasOnlyCPUMemory := ltRns.HasOnlyCPUMemory()
 		rtHasOnlyCPUMemory := rtRns.HasOnlyCPUMemory()
-
-		// Prioritize tasks that only consume CPU and memory
-		if ltHasOnlyCPUMemory && rtHasOnlyCPUMemory {
-			return 0
-		} else if ltHasOnlyCPUMemory {
-			return -1
-		} else if rtHasOnlyCPUMemory {
-			return 1
-		}
-
 		lMatchesPt := ptRns.Equals(ltRns)
 		rMatchesPt := ptRns.Equals(rtRns)
 
-		if lMatchesPt && rMatchesPt {
-			return 0
-		} else if lMatchesPt {
-			return -1
-		} else if rMatchesPt {
-			return 1
+		// This wierd hack will do the prioritization for Aumovio
+		if mC > 0 {
+			// Prioritize tasks that match preemptor on all dimensions (after filtering ignored scalar resources)
+			if lMatchesPt && rMatchesPt {
+				return 0
+			} else if lMatchesPt {
+				return -1
+			} else if rMatchesPt {
+				return 1
+			}
+
+			if ltHasOnlyCPUMemory && rtHasOnlyCPUMemory {
+				return 0
+			} else if ltHasOnlyCPUMemory {
+				return -1
+			} else if rtHasOnlyCPUMemory {
+				return 1
+			}
+		} else {
+			// Prioritize tasks that only consume CPU and memory
+			if ltHasOnlyCPUMemory && rtHasOnlyCPUMemory {
+				return 0
+			} else if ltHasOnlyCPUMemory {
+				return -1
+			} else if rtHasOnlyCPUMemory {
+				return 1
+			}
+
+			lMatchesPt := ptRns.Equals(ltRns)
+			rMatchesPt := ptRns.Equals(rtRns)
+
+			if lMatchesPt && rMatchesPt {
+				return 0
+			} else if lMatchesPt {
+				return -1
+			} else if rMatchesPt {
+				return 1
+			}
+
 		}
 
 		lPtIntersection := api.IntersectionWithIgnoredScalarResources(lt.Resreq, pt.Resreq)
