@@ -172,7 +172,6 @@ func (ra *Action) Execute(ssn *framework.Session) {
 	}
 }
 
-func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, job *api.JobInfo) {
 // nodeBuckets holds priority queues of nodes grouped by dimension match count
 type nodeBuckets struct {
 	buckets       map[int]*util.PriorityQueue
@@ -192,62 +191,62 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 	// Prioritize nodes by dimension match into buckets
 	nodeBuckets := ra.prioritizeNodesByDimensionMatch(predicateNodesByShardFlattened, dims, task)
 
-    // Process nodes bucket by bucket (highest match count first)
-    for i := nodeBuckets.maxMatchCount; i >= 0; i-- {
-        bucket, exists := nodeBuckets.buckets[i]
-        if !exists {
-            continue
-        }
+	// Process nodes bucket by bucket (highest match count first)
+	for i := nodeBuckets.maxMatchCount; i >= 0; i-- {
+		bucket, exists := nodeBuckets.buckets[i]
+		if !exists {
+			continue
+		}
 
 		klog.V(3).Infof("Processing bucket with %d dimension matches (%d nodes) for Task <%s/%s>",
-            i, bucket.Len(), task.Namespace, task.Name)
+			i, bucket.Len(), task.Namespace, task.Name)
 
+		// Process all nodes in this bucket (they're already in priority order)
+		for !bucket.Empty() {
+			n := bucket.Pop().(*api.NodeInfo)
+			klog.V(3).Infof("Considering Task <%s/%s> on Node <%s> with FutureIdle <%v>.",
+				task.Namespace, task.Name, n.Name, n.FutureIdle())
 
-        // Process all nodes in this bucket (they're already in priority order)
-        for !bucket.Empty() {
-            n := bucket.Pop().(*api.NodeInfo)
-            klog.V(3).Infof("Considering Task <%s/%s> on Node <%s> with FutureIdle <%v>.",
-                task.Namespace, task.Name, n.Name, n.FutureIdle())
-
-            // Build priority queue of reclaimees on this node
-            reclaimeesQueue := util.NewPriorityQueue(func(l, r interface{}) bool {
-                return ssn.VictimQueueAndTaskOrderFn(l, r, task)
-            })
+			// Build priority queue of reclaimees on this node
+			reclaimeesQueue := util.NewPriorityQueue(func(l, r interface{}) bool {
+				return ssn.VictimQueueAndTaskOrderFn(l, r, task, i)
+			})
 			var reclaimees []*api.TaskInfo
-            for _, taskOnNode := range n.Tasks {
-                if taskOnNode.Status != api.Running || !taskOnNode.Preemptable {
-                    continue
-                }
+			for _, taskOnNode := range n.Tasks {
+				if taskOnNode.Status != api.Running || !taskOnNode.Preemptable {
+					continue
+				}
 
-                if j, found := ssn.Jobs[taskOnNode.Job]; !found {
-                    continue
-                } else if j.Queue != job.Queue {
-                    q := ssn.Queues[j.Queue]
+				if j, found := ssn.Jobs[taskOnNode.Job]; !found {
+					continue
+				} else if j.Queue != job.Queue {
+					q := ssn.Queues[j.Queue]
 
-                    if !q.Reclaimable() {
-                        continue
-                    }
-                    reclaimeesQueue.Push(taskOnNode.Clone())
-                    reclaimees = append(reclaimees, taskOnNode.Clone())
-                }
-            }
+					if !q.Reclaimable() {
+						continue
+					}
+					reclaimeesQueue.Push(taskOnNode.Clone())
+					reclaimees = append(reclaimees, taskOnNode.Clone())
+				}
+			}
 
-            if reclaimeesQueue.Empty() {
-                klog.V(4).Infof("No reclaimees on Node <%s>.", n.Name)
-                continue
-            }
+			if reclaimeesQueue.Empty() {
+				klog.V(4).Infof("No reclaimees on Node <%s>.", n.Name)
+				continue
+			}
 
-            reclaimees := make([]*api.TaskInfo, 0, reclaimeesQueue.Len())
-            for !reclaimeesQueue.Empty() {
-                reclaimees = append(reclaimees, reclaimeesQueue.Pop().(*api.TaskInfo))
-            }
+			reclaimees = make([]*api.TaskInfo, 0, reclaimeesQueue.Len())
+			for !reclaimeesQueue.Empty() {
+				reclaimees = append(reclaimees, reclaimeesQueue.Pop().(*api.TaskInfo))
+			}
+
 			victims := ssn.Reclaimable(task, reclaimees)
 			if err := util.ValidateVictims(task, n, victims); err != nil {
 				klog.V(3).Infof("No validated victims on Node <%s>: %v", n.Name, err)
 				continue
 			}
 
-			victimsQueue := ssn.BuildAumovioVictimPriorityQueue(victims, task)
+			victimsQueue := ssn.BuildAumovioVictimPriorityQueue(victims, task, i)
 			resreq := task.InitResreq.Clone()
 			reclaimed := api.EmptyResource()
 

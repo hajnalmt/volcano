@@ -169,7 +169,7 @@ func (alloc *Action) buildAllocateContext() (*allocateContext, *allocateContext)
 		// job without any hard network topology policy use actx.tasksNoHardTopology
 		if !job.ContainsHardTopology() {
 			if subJobWorksheet, exist := worksheet.subJobWorksheets[job.DefaultSubJobID()]; exist {
-				actx.tasksNoHardTopology[job.UID] = subJobWorksheet.tasks
+				ctx.tasksNoHardTopology[job.UID] = subJobWorksheet.tasks
 			}
 		}
 	}
