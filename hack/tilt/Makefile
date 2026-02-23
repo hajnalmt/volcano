@@ -23,17 +23,59 @@ $(error BIN_DIR is not set. Please define it in the parent Makefile.)
 endif
 
 TILT_VERSION=0.35.1
-K3D_VERSION=v5.8.3
+KIND_VERSION ?= v0.30.0
 TILT_BIN=${BIN_DIR}/tilt
-K3D_BIN=${BIN_DIR}/k3d
+KIND_BIN=${BIN_DIR}/kind
 
-K3D_DATA_DIR?=$(OUTPUT_DIR)/k3d-data
-K3D_CLUSTER_NAME ?= volcano-dev
-K3D_REGISTRY_NAME ?= volcano-registry
-K3D_REGISTRY_PORT ?= 5000
-K3D_SERVERS ?= 1
-K3D_AGENTS ?= 3
-K3D_API_PORT ?= 6510
+KIND_CLUSTER_NAME ?= volcano-dev
+KIND_CONTEXT_NAME ?= ${KIND_CLUSTER_NAME}
+KIND_CONFIG ?= hack/e2e-kind-config.yaml
+
+TILT_WAIT_TIMEOUT ?= 10m
+TILT_WAIT_RESOURCES ?= \
+	uiresource/uncategorized \
+	uiresource/volcano-namespaces \
+	uiresource/volcano-crds \
+	uiresource/volcano-vcjob-roles \
+	uiresource/volcano-admission-init \
+	uiresource/volcano-admission \
+	uiresource/volcano-scheduler \
+	uiresource/volcano-controllers \
+	uiresource/prometheus-deployment \
+	uiresource/kube-state-metrics \
+	uiresource/grafana
+
+# Install Kind if not present in _output/bin or wrong version
+dev-install-kind:
+	@PATH="${BIN_DIR}:$$PATH" KIND_BIN="${KIND_BIN}" KIND_VERSION="${KIND_VERSION}" bash -c 'source hack/lib/install.sh; check-kind'
+
+# Create Kind cluster for local dev
+dev-create-kind-cluster:
+	@PATH="${BIN_DIR}:$$PATH" bash -c 'source hack/lib/install.sh; CLUSTER_CONTEXT=("--name" "${KIND_CLUSTER_NAME}"); KIND_OPT="--config ${KIND_CONFIG} --wait 5m"; kind-create-cluster'
+
+.PHONY: dev-up
+dev-up: dev-install-tilt dev-install-kind
+	$(MAKE) dev-create-kind-cluster
+	$(TILT_BIN) up -f hack/tilt/Tiltfile
+
+.PHONY: dev-down
+dev-down:
+	@$(TILT_BIN) down -f hack/tilt/Tiltfile 2>/dev/null || true
+
+# Delete Kind cluster
+.PHONY: dev-delete-kind-cluster
+dev-delete-kind-cluster:
+	@${KIND_BIN} delete cluster --name ${KIND_CLUSTER_NAME} || true
+
+.PHONY: dev-clean
+dev-clean: dev-down dev-delete-kind-cluster
+	rm -f $(KIND_BIN) $(TILT_BIN)
+
+.PHONY: dev-status
+dev-status:
+	${KIND_BIN} get clusters
+	@echo ---
+	@kubectl cluster-info --context ${KIND_CONTEXT_NAME} 2>/dev/null || kubectl cluster-info --context kind-${KIND_CLUSTER_NAME} 2>/dev/null || echo "Cluster not running."
 
 # Install Tilt if not present in _output/bin or wrong version
 dev-install-tilt:
@@ -46,98 +88,34 @@ dev-install-tilt:
 		printf "Tilt already installed at ${TILT_BIN} (version ${TILT_VERSION}).\n"; \
 	fi
 
-# Install k3d if not present in _output/bin or wrong version
-dev-install-k3d:
-	@if [ ! -f ${K3D_BIN} ] || [ "$$(${K3D_BIN} version | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)" != "${K3D_VERSION}" ]; then \
-		curl -fsSL https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64 -o ${K3D_BIN}; \
-		chmod +x ${K3D_BIN}; \
-		printf "k3d installed at ${K3D_BIN} (version ${K3D_VERSION}).\n"; \
+.PHONY: dev-tilt-status
+dev-tilt-status: dev-install-tilt
+	${TILT_BIN} get uiresource
+
+.PHONY: dev-tilt-logs
+dev-tilt-logs: dev-install-tilt
+	@if [ -n "${RESOURCE}" ]; then \
+		${TILT_BIN} logs ${RESOURCE}; \
 	else \
-		printf "k3d already installed at ${K3D_BIN} (version ${K3D_VERSION}).\n"; \
+		${TILT_BIN} logs; \
 	fi
 
-# Create k3d cluster for local dev
-dev-create-k3d-cluster:
-	mkdir -pv $(K3D_DATA_DIR)/k3s_storage
-	mkdir -pv $(K3D_DATA_DIR)/machine-id-server-0
-	mkdir -pv $(K3D_DATA_DIR)/containerd/server-0
-	@for i in $$(seq 0 $$(($${K3D_AGENTS} - 1))); do \
-		mkdir -pv $(K3D_DATA_DIR)/containerd/agent-$$i; \
-		mkdir -pv $(K3D_DATA_DIR)/machine-id-agent-$$i; \
-    done
-	@( ${K3D_BIN} cluster list | grep -w $(K3D_CLUSTER_NAME) && echo "Cluster already exists." ) \
-	|| ${K3D_BIN} cluster create ${K3D_CLUSTER_NAME} \
-		--servers $(K3D_SERVERS) \
-		--agents $(K3D_AGENTS) \
-		--api-port $(K3D_API_PORT) \
-		--registry-use k3d-$(K3D_REGISTRY_NAME):$(K3D_REGISTRY_PORT) \
-		--no-lb \
-		--volume $(K3D_DATA_DIR)/k3s_storage:/var/lib/rancher/k3s/storage \
-		--volume $(K3D_DATA_DIR)/machine-id-server-0:/etc/machine-id@server:0 \
-		--volume $(K3D_DATA_DIR)/containerd/server-0:/var/lib/rancher/k3s/agent/containerd@server:0 \
-		$(foreach i,$(shell seq 0 $$(($(K3D_AGENTS)-1))),--volume $(K3D_DATA_DIR)/machine-id-agent-$(i):/etc/machine-id@agent:$(i) ) \
-		$(foreach i,$(shell seq 0 $$(($(K3D_AGENTS)-1))),--volume $(K3D_DATA_DIR)/containerd/agent-$(i):/var/lib/rancher/k3s/agent/containerd@agent:$(i) ) \
-		--wait 
+.PHONY: dev-tilt-describe
+dev-tilt-describe: dev-install-tilt
+	@if [ -z "${RESOURCE}" ]; then \
+		echo "RESOURCE is required. Example: make dev-tilt-describe RESOURCE=volcano-scheduler"; \
+		exit 1; \
+	fi
+	${TILT_BIN} describe uiresource ${RESOURCE}
 
-.PHONY: dev-start-k3d-cluster
-dev-start-k3d-cluster:
-	@${K3D_BIN} cluster start ${K3D_CLUSTER_NAME}
+.PHONY: dev-tilt-trigger
+dev-tilt-trigger: dev-install-tilt
+	@if [ -z "${RESOURCE}" ]; then \
+		echo "RESOURCE is required. Example: make dev-tilt-trigger RESOURCE=volcano-scheduler"; \
+		exit 1; \
+	fi
+	${TILT_BIN} trigger ${RESOURCE}
 
-.PHONY: dev-up
-dev-up: dev-install-tilt dev-install-k3d dev-registry-create
-	@cluster_status="$$($${K3D_BIN} cluster list | grep -w $${K3D_CLUSTER_NAME})"; \
-	if [ -n "$$cluster_status" ]; then \
-	    server_status=$$(echo "$$cluster_status" | awk '{print $$2}'); \
-        if echo "$$server_status" | grep -q '^0/'; then \
-            echo "Cluster exists but is stopped. Starting..."; \
-            $(MAKE) dev-start-k3d-cluster; \
-        else \
-            echo "Cluster already running."; \
-        fi; \
-	else \
-		$(MAKE) dev-create-k3d-cluster; \
-	fi;
-	$(TILT_BIN) up -f hack/tilt/Tiltfile
-
-.PHONY: dev-down
-dev-down: dev-stop-k3d-cluster
-
-.PHONY: dev-clean
-dev-clean: dev-delete-k3d-cluster dev-delete-registry
-	rm -rf $(K3D_DATA_DIR)
-	rm -f $(K3D_BIN) $(TILT_BIN)
-
-.PHONY: dev-stop-k3d-cluster
-dev-stop-k3d-cluster:
-	@${K3D_BIN} cluster stop ${K3D_CLUSTER_NAME} || true
-
-# Delete k3d cluster
-.PHONY: dev-delete-k3d-cluster
-dev-delete-k3d-cluster:
-	@${K3D_BIN} cluster delete ${K3D_CLUSTER_NAME} || true
-
-# Delete k3d cluster
-.PHONY: dev-delete-registry
-dev-delete-registry:
-	@${K3D_BIN} registry delete ${K3D_REGISTRY_NAME} || true
-
-# Stop local dev environment
-.PHONY: dev-down
-dev-down: dev-stop-k3d-cluster
-
-.PHONY: dev-registry-create
-dev-registry-create:
-	@( ${K3D_BIN} registry ls k3d-${K3D_REGISTRY_NAME} && echo "Local registry already exists." ) \
-	|| ${K3D_BIN} registry create ${K3D_REGISTRY_NAME} --port 0.0.0.0:${K3D_REGISTRY_PORT}
-
-.PHONY: dev-registry-delete
-dev-registry-delete:
-	${K3D_BIN} registry delete ${K3D_REGISTRY_NAME}
-
-.PHONY: dev-status
-dev-status:
-	${K3D_BIN} registry ls
-	@echo ---
-	${K3D_BIN} cluster ls
-
-
+.PHONY: dev-wait-ready
+dev-wait-ready: dev-install-tilt
+	${TILT_BIN} wait --for=condition=Ready ${TILT_WAIT_RESOURCES} --timeout=${TILT_WAIT_TIMEOUT}

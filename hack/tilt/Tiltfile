@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Ensure k3d cluster exists for local dev
-k3d_cluster_name = 'k3d-volcano-dev'
-allow_k8s_contexts(k3d_cluster_name)
+# Ensure Kind cluster exists for local dev
+kind_cluster_name = 'volcano-dev'
+allow_k8s_contexts([kind_cluster_name, 'kind-' + kind_cluster_name])
 
 # Set the default namespace for all resources
 k8s_namespace('volcano-system')
