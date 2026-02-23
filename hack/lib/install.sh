@@ -82,7 +82,17 @@ function check-prerequisites {
 # check if kind installed
 function check-kind {
   local kind_cmd=${KIND_BIN:-kind}
-  local required_version=${KIND_VERSION:-v0.30.0}
+  local required_version=${KIND_VERSION}
+
+  # If KIND_VERSION is not set, try to resolve it from Makefile in VK_ROOT
+  if [[ -z "${required_version}" ]] && [[ -n "${VK_ROOT}" ]] && [[ -f "${VK_ROOT}/Makefile" ]]; then
+    required_version=$(make -s -C "${VK_ROOT}" print-kind-version 2>/dev/null)
+  fi
+
+  if [[ -z "${required_version}" ]]; then
+    echo "ERROR: KIND_VERSION is not set and could not be resolved from Makefile"
+    return 1
+  fi
 
   echo "Checking kind"
   if command -v "${kind_cmd}" >/dev/null 2>&1; then

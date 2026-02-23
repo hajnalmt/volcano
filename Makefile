@@ -63,12 +63,15 @@ DOCKER_PLATFORMS ?= "linux/${GOARCH}"
 
 GOOS ?= linux
 KIND_VERSION ?= v0.30.0
-CTLPTL_VERSION ?= 0.9.0
 
 include Makefile.def
 include hack/tilt/Makefile
 
 .EXPORT_ALL_VARIABLES:
+
+.PHONY: print-kind-version
+print-kind-version:
+	@printf "%s\n" "${KIND_VERSION}"
 
 all: vc-scheduler vc-agent-scheduler vc-controller-manager vc-webhook-manager vc-agent vcctl command-lines
 

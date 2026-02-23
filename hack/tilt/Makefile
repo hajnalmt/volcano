@@ -23,11 +23,14 @@ $(error BIN_DIR is not set. Please define it in the parent Makefile.)
 endif
 
 TILT_VERSION=0.35.1
-KIND_VERSION ?= v0.30.0
 CTLPTL_VERSION ?= 0.9.0
 TILT_BIN=${BIN_DIR}/tilt
 KIND_BIN=${BIN_DIR}/kind
 CTLPTL_BIN=${BIN_DIR}/ctlptl
+
+ifndef KIND_VERSION
+$(error KIND_VERSION is not set. Please define it in the parent Makefile.)
+endif
 
 KIND_CLUSTER_NAME ?= kind-volcano-dev
 KIND_CONTEXT_NAME ?= ${KIND_CLUSTER_NAME}
