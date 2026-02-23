@@ -24,12 +24,14 @@ endif
 
 TILT_VERSION=0.35.1
 KIND_VERSION ?= v0.30.0
+CTLPTL_VERSION ?= 0.9.0
 TILT_BIN=${BIN_DIR}/tilt
 KIND_BIN=${BIN_DIR}/kind
+CTLPTL_BIN=${BIN_DIR}/ctlptl
 
-KIND_CLUSTER_NAME ?= volcano-dev
+KIND_CLUSTER_NAME ?= kind-volcano-dev
 KIND_CONTEXT_NAME ?= ${KIND_CLUSTER_NAME}
-KIND_CONFIG ?= hack/e2e-kind-config.yaml
+CTLPTL_CONFIG ?= hack/tilt/ctlptl-kind-registry.yaml
 
 TILT_WAIT_TIMEOUT ?= 10m
 TILT_WAIT_RESOURCES ?= \
@@ -49,31 +51,43 @@ TILT_WAIT_RESOURCES ?= \
 dev-install-kind:
 	@PATH="${BIN_DIR}:$$PATH" KIND_BIN="${KIND_BIN}" KIND_VERSION="${KIND_VERSION}" bash -c 'source hack/lib/install.sh; check-kind'
 
-# Create Kind cluster for local dev
+# Install ctlptl if not present in _output/bin or wrong version
+dev-install-ctlptl:
+	@if [ ! -f ${CTLPTL_BIN} ] || [ "$$(${CTLPTL_BIN} version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" != "${CTLPTL_VERSION}" ]; then \
+		mkdir -p ${BIN_DIR}; \
+		curl -fsSL https://github.com/tilt-dev/ctlptl/releases/download/v${CTLPTL_VERSION}/ctlptl.${CTLPTL_VERSION}.linux.x86_64.tar.gz | tar -xz -C ${BIN_DIR} ctlptl; \
+		chmod +x ${CTLPTL_BIN}; \
+		printf "ctlptl installed at ${CTLPTL_BIN} (version ${CTLPTL_VERSION}).\n"; \
+	else \
+		printf "ctlptl already installed at ${CTLPTL_BIN} (version ${CTLPTL_VERSION}).\n"; \
+	fi
+
+# Create Kind cluster and registry for local dev via ctlptl
 dev-create-kind-cluster:
-	@PATH="${BIN_DIR}:$$PATH" bash -c 'source hack/lib/install.sh; CLUSTER_CONTEXT=("--name" "${KIND_CLUSTER_NAME}"); KIND_OPT="--config ${KIND_CONFIG} --wait 5m"; kind-create-cluster'
+	${CTLPTL_BIN} apply -f ${CTLPTL_CONFIG}
 
 .PHONY: dev-up
-dev-up: dev-install-tilt dev-install-kind
+dev-up: dev-install-tilt dev-install-kind dev-install-ctlptl
 	$(MAKE) dev-create-kind-cluster
 	$(TILT_BIN) up -f hack/tilt/Tiltfile
 
 .PHONY: dev-down
 dev-down:
 	@$(TILT_BIN) down -f hack/tilt/Tiltfile 2>/dev/null || true
+	@pkill -f '^${TILT_BIN} up -f hack/tilt/Tiltfile$$' || true
 
-# Delete Kind cluster
+# Delete Kind cluster and registry managed by ctlptl
 .PHONY: dev-delete-kind-cluster
 dev-delete-kind-cluster:
-	@${KIND_BIN} delete cluster --name ${KIND_CLUSTER_NAME} || true
+	@${CTLPTL_BIN} delete -f ${CTLPTL_CONFIG} --cascade=true --ignore-not-found || true
 
 .PHONY: dev-clean
 dev-clean: dev-down dev-delete-kind-cluster
-	rm -f $(KIND_BIN) $(TILT_BIN)
+	rm -f $(KIND_BIN) $(CTLPTL_BIN) $(TILT_BIN)
 
 .PHONY: dev-status
 dev-status:
-	${KIND_BIN} get clusters
+	${CTLPTL_BIN} get cluster
 	@echo ---
 	@kubectl cluster-info --context ${KIND_CONTEXT_NAME} 2>/dev/null || kubectl cluster-info --context kind-${KIND_CLUSTER_NAME} 2>/dev/null || echo "Cluster not running."
 

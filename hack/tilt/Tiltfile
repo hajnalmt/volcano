@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Ensure Kind cluster exists for local dev
-kind_cluster_name = 'volcano-dev'
+kind_cluster_name = 'kind-volcano-dev'
 allow_k8s_contexts([kind_cluster_name, 'kind-' + kind_cluster_name])
 
 # Set the default namespace for all resources

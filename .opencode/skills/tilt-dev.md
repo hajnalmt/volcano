@@ -1,7 +1,7 @@
-# Tilt Dev Loop (Kind volcano-dev)
+# Tilt Dev Loop (Kind kind-volcano-dev)
 
 Use this skill to run and operate Volcano's local Tilt development loop on the
-Kind cluster named `volcano-dev`.
+Kind cluster named `kind-volcano-dev`, provisioned by `ctlptl` with a local registry.
 
 ## When to use
 
@@ -15,7 +15,7 @@ Kind cluster named `volcano-dev`.
 
 - Use repository root as the working directory.
 - Prefer project binaries from `_output/bin/` when available.
-- Keep cluster name fixed to `volcano-dev`.
+- Keep cluster name fixed to `kind-volcano-dev`.
 - Use `hack/tilt/Tiltfile` as the single Tilt entrypoint.
 
 ## Canonical workflow
@@ -27,8 +27,8 @@ make dev-up
 ```
 
 What this does:
-- Ensures `tilt` and `kind` binaries are available in `_output/bin/`.
-- Creates Kind cluster `volcano-dev` if missing.
+- Ensures `tilt`, `kind`, and `ctlptl` binaries are available in `_output/bin/`.
+- Creates/updates a `ctlptl`-managed Kind cluster + local registry from `hack/tilt/ctlptl-kind-registry.yaml`.
 - Runs `tilt up -f hack/tilt/Tiltfile`.
 
 2) Quick status snapshot
@@ -88,15 +88,15 @@ If `make dev-up` fails:
 1. Confirm cluster exists:
 
 ```bash
-_output/bin/kind get clusters
+_output/bin/ctlptl get cluster
 ```
 
-Expected: `volcano-dev` appears in the list.
+Expected: a cluster named `kind-volcano-dev` appears in the list.
 
 2. Confirm context matches Tiltfile expectation:
 
 ```bash
-kubectl config get-contexts -o name | grep -E '^(volcano-dev|kind-volcano-dev)$'
+kubectl config get-contexts -o name | grep -E '^(kind-volcano-dev|kind-kind-volcano-dev)$'
 ```
 
 3. Verify Tilt can see resources:

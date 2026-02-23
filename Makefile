@@ -63,6 +63,7 @@ DOCKER_PLATFORMS ?= "linux/${GOARCH}"
 
 GOOS ?= linux
 KIND_VERSION ?= v0.30.0
+CTLPTL_VERSION ?= 0.9.0
 
 include Makefile.def
 include hack/tilt/Makefile
