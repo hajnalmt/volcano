@@ -25,6 +25,9 @@ export CLEANUP_CLUSTER=${CLEANUP_CLUSTER:-1}
 export E2E_TYPE=${E2E_TYPE:-"ALL"}
 export ARTIFACTS_PATH=${ARTIFACTS_PATH:-"${VK_ROOT}/volcano-e2e-logs"}
 DRA_GINKGO_FOCUS=${DRA_GINKGO_FOCUS:-"DRA (Quota )?E2E Test"}
+export E2E_LOCAL_ONLY=${E2E_LOCAL_ONLY:-0}
+export E2E_FOCUS=${E2E_FOCUS:-""}
+export E2E_SKIP=${E2E_SKIP:-""}
 mkdir -p "$ARTIFACTS_PATH"
 
 NAMESPACE=${NAMESPACE:-volcano-system}
@@ -380,6 +383,27 @@ function uninstall-volcano {
   helm uninstall "${CLUSTER_NAME}" -n ${NAMESPACE}
 }
 
+function run-ginkgo-suite() {
+  local suite_path=$1
+  local default_focus=$2
+  local default_skip=$3
+  shift 3
+
+  local focus=${E2E_FOCUS:-${default_focus}}
+  local skip=${E2E_SKIP:-${default_skip}}
+
+  local cmd=(ginkgo "$@")
+  if [[ -n "${focus}" ]]; then
+    cmd+=(--focus="${focus}")
+  fi
+  if [[ -n "${skip}" ]]; then
+    cmd+=(--skip="${skip}")
+  fi
+  cmd+=("${suite_path}")
+
+  KUBECONFIG=${KUBECONFIG} GOOS=${OS} "${cmd[@]}"
+}
+
 function generate-log {
     echo "Generating volcano log files"
     kind export logs "${CLUSTER_CONTEXT[@]}" "$ARTIFACTS_PATH"
@@ -420,7 +444,9 @@ if [[ -z ${KUBECONFIG+x} ]]; then
     export KUBECONFIG="${HOME}/.kube/config"
 fi
 
-if [[ "${SKIP_CLUSTER_SETUP:-0}" -eq 1 ]]; then
+if [[ ${E2E_LOCAL_ONLY} -eq 1 ]]; then
+    echo "Skipping cluster setup and Volcano install (E2E_LOCAL_ONLY=1), using existing local environment"
+elif [[ "${SKIP_CLUSTER_SETUP:-0}" -eq 1 ]]; then
     echo "Skipping cluster setup (SKIP_CLUSTER_SETUP=1), using existing cluster"
     check-prerequisites
 else
@@ -437,72 +463,73 @@ fi
 # Run e2e test
 cd ${VK_ROOT}
 
-install-ginkgo-if-not-exist
+if [[ ${E2E_LOCAL_ONLY} -ne 1 ]]; then
+    install-ginkgo-if-not-exist
+fi
 
 case ${E2E_TYPE} in
 "ALL")
     echo "Running e2e..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress ./test/e2e/jobp/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingbase/
-    # k8s 1.35 init will import its e2e suite, these k8s's suites need to skip
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --skip="\[sig-.*\]" --slow-spec-threshold='30s' --progress ./test/e2e/schedulingaction/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/vcctl/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/cronjob/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress --focus="${DRA_GINKGO_FOCUS}" ./test/e2e/dra/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/admission/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/hypernode/
+    run-ginkgo-suite ./test/e2e/jobp/ "" "" -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/jobseq/ "" "" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/schedulingbase/ "" "" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/schedulingaction/ "" "\[sig-.*\]" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/vcctl/ "" "" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/cronjob/ "" "" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/dra/ "${DRA_GINKGO_FOCUS}" "" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/admission/ "" "" -r --slow-spec-threshold='30s' --progress
+    run-ginkgo-suite ./test/e2e/hypernode/ "" "" -r --slow-spec-threshold='30s' --progress
     ;;
 "JOBP")
     echo "Running parallel job e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress ./test/e2e/jobp/
+    run-ginkgo-suite ./test/e2e/jobp/ "" "" -v -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress
     ;;
 "JOBSEQ")
     echo "Running sequence job e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/
+    run-ginkgo-suite ./test/e2e/jobseq/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "SCHEDULINGBASE")
     echo "Running scheduling base e2e suite...(need skip k8s framework's suites)"
     # k8s 1.35 init will import its e2e suite, these k8s's suites need to skip
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --skip="\[sig-.*\]" --slow-spec-threshold='30s' --progress ./test/e2e/schedulingbase/
+    run-ginkgo-suite ./test/e2e/schedulingbase/ "" "\[sig-.*\]" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "SCHEDULINGACTION")
     echo "Running scheduling action e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingaction/
+    run-ginkgo-suite ./test/e2e/schedulingaction/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "SCHEDULINGGATES")
     echo "Running scheduling gates e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulinggates/
+    run-ginkgo-suite ./test/e2e/schedulinggates/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "VCCTL")
     echo "Running vcctl e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/vcctl/
+    run-ginkgo-suite ./test/e2e/vcctl/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "STRESS")
     echo "Running stress e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/stress/
+    run-ginkgo-suite ./test/e2e/stress/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "DRA")
     echo "Running dra e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress --focus="${DRA_GINKGO_FOCUS}" ./test/e2e/dra/
+    run-ginkgo-suite ./test/e2e/dra/ "${DRA_GINKGO_FOCUS}" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "ADMISSION_POLICY")
     echo "Running admission policy e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/admission/
+    run-ginkgo-suite ./test/e2e/admission/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "ADMISSION_WEBHOOK")
     echo "Running admission webhook e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/admission/
+    run-ginkgo-suite ./test/e2e/admission/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "HYPERNODE")
     echo "Creating 8 kwok nodes for 3-tier topology"
     install-kwok-nodes 8
     echo "Running hypernode e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/hypernode/
+    run-ginkgo-suite ./test/e2e/hypernode/ "" "" -r --slow-spec-threshold='30s' --progress
     ;;
 "CRONJOB")
     echo "Running cronjob e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/cronjob/
+    run-ginkgo-suite ./test/e2e/cronjob/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "AGENTSCHEDULER"|"AGENTSCHEDULER_NONE"|"AGENTSCHEDULER_SOFT"|"AGENTSCHEDULER_HARD")
     agent_scheduler_sharding_mode="${E2E_TYPE#AGENTSCHEDULER_}"
@@ -511,17 +538,17 @@ case ${E2E_TYPE} in
     fi
     agent_scheduler_sharding_mode=$(echo "${agent_scheduler_sharding_mode}" | tr '[:upper:]' '[:lower:]')
     echo "Running agent scheduler ${agent_scheduler_sharding_mode} e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo --label-filter="${agent_scheduler_sharding_mode}" -v -r --slow-spec-threshold='30s' --progress ./test/e2e/agentscheduler/
+    run-ginkgo-suite ./test/e2e/agentscheduler/ "" "" --label-filter="${agent_scheduler_sharding_mode}" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "SHARDINGCONTROLLER")
     echo "Running sharding controller e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/shardingcontroller/
+    run-ginkgo-suite ./test/e2e/shardingcontroller/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "GANGEVICT")
     echo "Creating 4 kwok nodes for gang eviction topology tests"
     install-kwok-nodes 4
     echo "Running gang eviction e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/gangevict/
+    run-ginkgo-suite ./test/e2e/gangevict/ "" "" -v -r --slow-spec-threshold='30s' --progress
     ;;
 "SCHEDULERSHARDING"|"SCHEDULERSHARDING_NONE"|"SCHEDULERSHARDING_SOFT"|"SCHEDULERSHARDING_HARD")
     scheduler_sharding_mode="${E2E_TYPE#SCHEDULERSHARDING_}"
@@ -530,7 +557,7 @@ case ${E2E_TYPE} in
     fi
     scheduler_sharding_mode=$(echo "${scheduler_sharding_mode}" | tr '[:upper:]' '[:lower:]')
     echo "Running scheduler sharding ${scheduler_sharding_mode} e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo --label-filter="${scheduler_sharding_mode}" -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulersharding/
+    run-ginkgo-suite ./test/e2e/schedulersharding/ "" "" --label-filter="${scheduler_sharding_mode}" -v -r --slow-spec-threshold='30s' --progress
     ;;
 esac
 
