@@ -140,3 +140,12 @@ vendor
 
 # helm dependency files
 installer/helm/chart/volcano/requirements.lock
+
+#### Agentic entries
+# Oh my opencode sisyphus agent work directory
+# https://github.com/code-yeongyu/oh-my-opencode
+.sisyphus/
+.sisyphus/*
+
+# Codex local environment metadata
+.codex/
