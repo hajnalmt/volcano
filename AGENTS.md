@@ -4,7 +4,7 @@ This guide provides essential information for AI coding agents working on the Vo
 
 ## Project Overview
 
-Volcano is a Kubernetes-native batch scheduling system written in Go 1.24+. It extends kube-scheduler for AI/ML, Big Data, and HPC workloads. The project follows standard Go conventions with Kubernetes-specific patterns.
+Volcano is a Kubernetes-native batch scheduling system written in Go 1.25+. It extends kube-scheduler for AI/ML, Big Data, and HPC workloads. The project follows standard Go conventions with Kubernetes-specific patterns.
 
 ## Build Commands
 
