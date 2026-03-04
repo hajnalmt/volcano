@@ -330,6 +330,41 @@ func TestPreempt(t *testing.T) {
 			ExpectEvictNum: 1,
 			ExpectEvicted:  []string{"c1/preemptee2"},
 		},
+		{
+			// Regression test for multi-queue preemptorTasks overwrite bug.
+			// When the "Preemption between Task within Job" loop was nested inside the
+			// "Preemption between Jobs within Queue" loop, iterating over underRequest
+			// (shared across all queues) would drain preemptorTasks for jobs in other
+			// queues. With non-deterministic Go map iteration, if q1 (no preemptors)
+			// is processed before q2, q2's preemptorTasks get consumed in q1's
+			// intra-job loop, leaving q2's between-jobs preemption with no tasks.
+			Name: "multi-queue: preemptorTasks must not be overwritten by intra-job preemption of another queue",
+			PodGroups: []*schedulingv1beta1.PodGroup{
+				// pg1 in q1: non-starving job — ensures q1 is in the queues map
+				util.BuildPodGroup("pg1", "c1", "q1", 1, map[string]int32{"": 1}, schedulingv1beta1.PodGroupInqueue),
+				// pg2 in q2: low-priority victim job
+				util.BuildPodGroupWithPrio("pg2", "c1", "q2", 0, map[string]int32{}, schedulingv1beta1.PodGroupInqueue, "low-priority"),
+				// pg3 in q2: high-priority starving job (minAvailable=1, no running tasks)
+				util.BuildPodGroupWithPrio("pg3", "c1", "q2", 1, map[string]int32{"": 1}, schedulingv1beta1.PodGroupInqueue, "high-priority"),
+			},
+			Pods: []*v1.Pod{
+				// pg1 running task in q1 — makes q1 appear in queues map
+				util.BuildPod("c1", "q1-runner1", "n1", v1.PodRunning, api.BuildResourceList("1", "1G"), "pg1", make(map[string]string), make(map[string]string)),
+				// pg2 running task in q2 — preemption target
+				util.BuildPod("c1", "q2-preemptee1", "n1", v1.PodRunning, api.BuildResourceList("1", "1G"), "pg2", map[string]string{schedulingv1beta1.PodPreemptable: "true"}, make(map[string]string)),
+				// pg3 pending task in q2 — preemptor
+				util.BuildPod("c1", "q2-preemptor1", "", v1.PodPending, api.BuildResourceList("1", "1G"), "pg3", make(map[string]string), make(map[string]string)),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n1", api.BuildResourceList("2", "2G", []api.ScalarResource{{Name: "pods", Value: "10"}}...), make(map[string]string)),
+			},
+			Queues: []*schedulingv1beta1.Queue{
+				util.BuildQueue("q1", 1, nil),
+				util.BuildQueue("q2", 1, api.BuildResourceList("4", "4G")),
+			},
+			ExpectEvicted:  []string{"c1/q2-preemptee1"},
+			ExpectEvictNum: 1,
+		},
 	}
 
 	trueValue := true
