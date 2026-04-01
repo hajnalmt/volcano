@@ -374,7 +374,7 @@ func (pmpt *Action) normalPreempt(
 		// when preemption succeeds.
 		nodeStmt := framework.NewStatement(ssn)
 
-		victimsQueue := ssn.BuildVictimsPriorityQueue(victims, preemptor)
+		victimsQueue := ssn.BuildAumovioVictimPriorityQueue(victims, preemptor)
 		// Preempt victims for tasks, pick lowest priority task first.
 		preempted := api.EmptyResource()
 
