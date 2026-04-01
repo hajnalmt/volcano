@@ -863,10 +863,10 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 		if len(lPtIntersection) == len(rPtIntersection) {
 			return 0
 		} else if len(lPtIntersection) > len(rPtIntersection) {
-			return -1
+			return 1
 		}
 
-		return 1
+		return -1
 	})
 	return true
 }
