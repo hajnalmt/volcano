@@ -256,7 +256,7 @@ func TestReclaim(t *testing.T) {
 			},
 			ExpectEvictNum: 1,
 			// cpu resource is enough in node, memory resource is not enough, need 1G memory to schedule preemptor1
-			ExpectEvicted: []string{"c1/preemptee1-1"},
+			ExpectEvicted: []string{"c1/preemptee2-1"},
 		},
 		{
 			Name: "Reclaim succeeds for second task when first task has PreemptionPolicy=Never",
