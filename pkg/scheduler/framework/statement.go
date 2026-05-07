@@ -49,9 +49,10 @@ const (
 )
 
 type operation struct {
-	name   Operation
-	task   *api.TaskInfo
-	reason string
+	name             Operation
+	task             *api.TaskInfo
+	reason           string
+	evictionOccurred bool // tracks whether eviction occurred for Pipeline ops
 }
 
 // Statement structure
@@ -232,8 +233,9 @@ func (s *Statement) Pipeline(task *api.TaskInfo, hostname string, evictionOccurr
 			task.Namespace, task.Name, hostname, len(errInfos))
 	} else {
 		s.operations = append(s.operations, operation{
-			name: Pipeline,
-			task: task,
+			name:             Pipeline,
+			task:             task,
+			evictionOccurred: evictionOccurred,
 		})
 		s.lastOps[task.UID] = Pipeline
 	}
@@ -408,7 +410,18 @@ func (s *Statement) unallocate(task *api.TaskInfo) error {
 
 // Discard operation for evict, pipeline and allocate
 func (s *Statement) Discard() {
-	klog.V(3).Info("Discarding operations ...")
+	s.DiscardWithReason("")
+}
+
+// DiscardWithReason discards all operations with a descriptive reason for logging.
+// Use this instead of Discard() when you want to clarify the intent in logs
+// (e.g., distinguishing temporary rollbacks from real failures).
+func (s *Statement) DiscardWithReason(reason string) {
+	if reason != "" {
+		klog.V(3).Infof("Discarding operations (%s) ...", reason)
+	} else {
+		klog.V(3).Info("Discarding operations ...")
+	}
 	for i := len(s.operations) - 1; i >= 0; i-- {
 		op := s.operations[i]
 		op.task.GenerateLastTxContext()
@@ -497,7 +510,7 @@ func (s *Statement) RecoverOperations(stmt *Statement) error {
 		case Evict:
 			s.Evict(op.task, op.reason)
 		case Pipeline:
-			err := s.Pipeline(op.task, op.task.NodeName, false)
+			err := s.Pipeline(op.task, op.task.NodeName, op.evictionOccurred)
 			if err != nil {
 				klog.Errorf("Failed to pipeline task: %s", err.Error())
 				return err

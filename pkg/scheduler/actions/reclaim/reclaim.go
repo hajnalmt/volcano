@@ -255,10 +255,6 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		return
 	}
 
-	// Save the original statement operations before trying any node
-	// This allows us to restore the original state if all node attempts fail
-	savedOriginalStmt := framework.SaveOperations(stmt)
-
 	// Set of nodes we've already tried and failed
 	triedNodes := make(map[string]bool)
 
@@ -321,7 +317,7 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		// If any eviction failed, discard all evictions for this node and try next
 		if evictionFailed {
 			klog.V(3).Infof("Eviction failed on Node <%s>, discarding all evictions and trying next node.", victimNode.Name)
-			nodeStmt.Discard()
+			nodeStmt.DiscardWithReason("eviction failed on node " + victimNode.Name)
 			continue
 		}
 
@@ -329,7 +325,7 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		if !taskCanBePipelined {
 			klog.V(3).Infof("Not enough resources on Node <%s> after reclaiming (reclaimed: %v, available: %v, required: %v), discarding and trying next node.",
 				victimNode.Name, reclaimed, availableResources, task.InitResreq)
-			nodeStmt.Discard()
+			nodeStmt.DiscardWithReason("insufficient resources on node " + victimNode.Name)
 			continue
 		}
 
@@ -337,24 +333,13 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		if err := nodeStmt.Pipeline(task, victimNode.Name, evictionOccurred); err != nil {
 			klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>: %v",
 				task.Namespace, task.Name, victimNode.Name, err)
-			nodeStmt.Discard()
+			nodeStmt.DiscardWithReason("pipeline failed on node " + victimNode.Name)
 			continue
 		}
-		mergedStmt := framework.SaveOperations(savedOriginalStmt, nodeStmt)
-		nodeStmt.Discard()
 
-		if err := stmt.RecoverOperations(mergedStmt); err != nil {
-			klog.Errorf("Failed to Save merged statements: %v", err)
-			// Try next node if merging fails
-			stmt.Discard()
-			if err := stmt.RecoverOperations(savedOriginalStmt); err != nil {
-				klog.Errorf("Failed to recover original statement operations: %v", err)
-				// This is a critical error, we cannot proceed
-				return
-			}
-			// We still have hope let's continue
-			continue
-		}
+		// Success: transfer ownership of nodeStmt's operations to the outer stmt.
+		// nodeStmt's effects (evictions, pipeline) are already live in the session.
+		stmt.Merge(nodeStmt)
 		klog.V(3).Infof("Successfully reclaimed and pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
 			task.Namespace, task.Name, victimNode.Name, reclaimed)
 		return
