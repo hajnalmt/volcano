@@ -202,6 +202,23 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 	for _, n := range predicateNodesByShardFlattened {
 		klog.V(3).Infof("Considering Task <%s/%s> on Node <%s>.", task.Namespace, task.Name, n.Name)
 
+		// If the node already has sufficient FutureIdle resources (e.g., from prior
+		// group evictions in this session), pipeline directly without needing victims.
+		futureIdle := n.FutureIdle()
+		if task.InitResreq.LessEqual(futureIdle, api.Zero) {
+			nodeStmt := framework.NewStatement(ssn)
+			if err := nodeStmt.Pipeline(task, n.Name, false); err != nil {
+				klog.V(3).Infof("Direct pipeline failed for Task <%s/%s> on Node <%s>: %v",
+					task.Namespace, task.Name, n.Name, err)
+				nodeStmt.DiscardWithReason("direct pipeline failed on node " + n.Name)
+			} else {
+				stmt.Merge(nodeStmt)
+				klog.V(3).Infof("Directly pipelined Task <%s/%s> on Node <%s> using available FutureIdle resources <%v>.",
+					task.Namespace, task.Name, n.Name, futureIdle)
+				return
+			}
+		}
+
 		var reclaimees []*api.TaskInfo
 		for _, taskOnNode := range n.Tasks {
 			if taskOnNode.Status != api.Running || !taskOnNode.Preemptable {
