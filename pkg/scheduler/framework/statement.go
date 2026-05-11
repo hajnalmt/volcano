@@ -86,6 +86,14 @@ func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) error {
 		// Skip this eviction
 		return nil
 	}
+	previousStatus := reclaimee.Status
+	queue := ""
+	jobName := string(reclaimee.Job)
+	if job, found := s.ssn.Jobs[reclaimee.Job]; found {
+		queue = string(job.Queue)
+		jobName = job.Name
+	}
+
 	// Update status in session
 	if job, found := s.ssn.Jobs[reclaimee.Job]; found {
 		job.UpdateTaskStatus(reclaimee, api.Releasing)
@@ -114,6 +122,8 @@ func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) error {
 	})
 
 	s.lastOps[reclaimee.UID] = Evict
+	klog.V(5).Infof("Evicted Task <%s/%s> for reason <%s> in Job <%s> Queue <%s> on Node <%s>: status <%s> -> <%s>, resource <%v>.",
+		reclaimee.Namespace, reclaimee.Name, reason, jobName, queue, reclaimee.NodeName, previousStatus, reclaimee.Status, reclaimee.Resreq)
 
 	// Group-eviction-policy support
 	if reason != "group-eviction-policy" {

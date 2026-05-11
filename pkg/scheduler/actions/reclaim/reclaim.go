@@ -23,13 +23,17 @@ limitations under the License.
 package reclaim
 
 import (
+	"sort"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
+	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/util"
+	commonutil "volcano.sh/volcano/pkg/util"
 )
 
 type Action struct {
@@ -143,6 +147,11 @@ func (ra *Action) Execute(ssn *framework.Session) {
 				klog.V(3).Infof("Considering reclaim for %d tasks of job <%s/%s>.", tasksQ.Len(), job.Namespace, job.Name)
 
 				task := tasksQ.Pop().(*api.TaskInfo)
+				if task.Status != api.Pending {
+					klog.V(5).Infof("Skip reclaim for Task <%s/%s> in Job <%s/%s> Queue <%s>: task status is <%s>, already assigned or no longer pending in this session.",
+						task.Namespace, task.Name, job.Namespace, job.Name, queue.Name, task.Status)
+					continue
+				}
 
 				if task.Pod.Spec.PreemptionPolicy != nil && *task.Pod.Spec.PreemptionPolicy == v1.PreemptNever {
 					klog.V(3).Infof("Task %s/%s cannot preempt (policy Never)", task.Namespace, task.Name)
@@ -192,6 +201,10 @@ func (ra *Action) reclaimForTask(
 	totalReclaimed *api.Resource,
 	creditedVictims map[api.TaskID]struct{},
 ) {
+	if pipelineWithReclaimCredits(ssn, stmt, task, reclaimedByNode, totalReclaimed) {
+		return
+	}
+
 	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
 	predicateHelper := util.NewPredicateHelper()
 	predicateNodes, _ := predicateHelper.PredicateNodes(task, totalNodes, ssn.PredicateForPreemptAction, ra.enablePredicateErrorCache, ssn.NodesInShard)
@@ -212,24 +225,6 @@ func (ra *Action) reclaimForTask(
 
 	for _, n := range predicateNodesByShardFlattened {
 		klog.V(3).Infof("Considering Task <%s/%s> on Node <%s>.", task.Namespace, task.Name, n.Name)
-
-		// Pipeline directly only when node FutureIdle is sufficient AND the resources
-		// are backed by reclaim credits accumulated in this scheduling cycle.
-		futureIdle := n.FutureIdle()
-		if task.InitResreq.LessEqual(futureIdle, api.Zero) && hasSufficientReclaimCredits(task, n.Name, reclaimedByNode, totalReclaimed) {
-			nodeStmt := framework.NewStatement(ssn)
-			if err := nodeStmt.Pipeline(task, n.Name, true); err != nil {
-				klog.V(3).Infof("Direct pipeline failed for Task <%s/%s> on Node <%s>: %v",
-					task.Namespace, task.Name, n.Name, err)
-				nodeStmt.DiscardWithReason("direct pipeline failed on node " + n.Name)
-			} else {
-				consumeReclaimCredits(task, n.Name, reclaimedByNode, totalReclaimed)
-				stmt.Merge(nodeStmt)
-				klog.V(3).Infof("Directly pipelined Task <%s/%s> on Node <%s> using FutureIdle <%v> and reclaim credits <%v>.",
-					task.Namespace, task.Name, n.Name, futureIdle, reclaimedByNode[n.Name])
-				return
-			}
-		}
 
 		var reclaimees []*api.TaskInfo
 		for _, taskOnNode := range n.Tasks {
@@ -397,6 +392,86 @@ func hasSufficientReclaimCredits(
 	}
 
 	return task.InitResreq.LessEqual(nodeCredits, api.Zero)
+}
+
+func pipelineWithReclaimCredits(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	task *api.TaskInfo,
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+) bool {
+	if !task.InitResreq.LessEqual(totalReclaimed, api.Zero) {
+		klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s>: requested <%v>, total reclaim credits <%v>.",
+			task.Namespace, task.Name, task.InitResreq, totalReclaimed)
+		return false
+	}
+
+	for _, nodeName := range reclaimCreditNodeNames(reclaimedByNode) {
+		node, found := ssn.Nodes[nodeName]
+		if !found {
+			klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s> on Node <%s>: node not found in session.",
+				task.Namespace, task.Name, nodeName)
+			continue
+		}
+
+		if options.ServerOpts.ShardingMode == commonutil.HardShardingMode && !ssn.NodesInShard.Has(nodeName) {
+			klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s> on Node <%s>: node is outside hard scheduler shard.",
+				task.Namespace, task.Name, nodeName)
+			continue
+		}
+
+		if !hasSufficientReclaimCredits(task, nodeName, reclaimedByNode, totalReclaimed) {
+			klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s> on Node <%s>: requested <%v>, node credits <%v>, total credits <%v>.",
+				task.Namespace, task.Name, nodeName, task.InitResreq, reclaimedByNode[nodeName], totalReclaimed)
+			continue
+		}
+
+		futureIdle := node.FutureIdle()
+		if !task.InitResreq.LessEqual(futureIdle, api.Zero) {
+			klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s> on Node <%s>: requested <%v>, future idle <%v>, credits <%v>.",
+				task.Namespace, task.Name, nodeName, task.InitResreq, futureIdle, reclaimedByNode[nodeName])
+			continue
+		}
+
+		if err := ssn.PredicateForPreemptAction(task, node); err != nil {
+			klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s> on Node <%s>: predicate failed: %v.",
+				task.Namespace, task.Name, nodeName, err)
+			continue
+		}
+
+		nodeStmt := framework.NewStatement(ssn)
+		if err := nodeStmt.Pipeline(task, nodeName, true); err != nil {
+			klog.V(5).Infof("Failed reclaim-credit pipeline for Task <%s/%s> on Node <%s>: %v.",
+				task.Namespace, task.Name, nodeName, err)
+			nodeStmt.DiscardWithReason("reclaim-credit pipeline failed on node " + nodeName)
+			continue
+		}
+
+		consumeReclaimCredits(task, nodeName, reclaimedByNode, totalReclaimed)
+		stmt.Merge(nodeStmt)
+		klog.V(3).Infof("Directly pipelined Task <%s/%s> on Node <%s> using reclaim credits and FutureIdle <%v>.",
+			task.Namespace, task.Name, nodeName, futureIdle)
+		klog.V(5).Infof("Consumed reclaim credits for Task <%s/%s> on Node <%s>: remaining node credits <%v>, total credits <%v>.",
+			task.Namespace, task.Name, nodeName, reclaimedByNode[nodeName], totalReclaimed)
+		return true
+	}
+
+	klog.V(5).Infof("No reclaim-credit pipeline candidate succeeded for Task <%s/%s>; falling back to victim discovery.",
+		task.Namespace, task.Name)
+	return false
+}
+
+func reclaimCreditNodeNames(reclaimedByNode map[string]*api.Resource) []string {
+	nodeNames := make([]string, 0, len(reclaimedByNode))
+	for nodeName, credits := range reclaimedByNode {
+		if credits == nil || credits.IsEmpty() {
+			continue
+		}
+		nodeNames = append(nodeNames, nodeName)
+	}
+	sort.Strings(nodeNames)
+	return nodeNames
 }
 
 func consumeReclaimCredits(
