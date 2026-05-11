@@ -122,6 +122,9 @@ func (ra *Action) Execute(ssn *framework.Session) {
 			}
 			job := jobsQ.Pop().(*api.JobInfo)
 			stmt := framework.NewStatement(ssn)
+			reclaimedByNode := make(map[string]*api.Resource)
+			totalReclaimed := api.EmptyResource()
+			creditedVictims := make(map[api.TaskID]struct{})
 
 			for {
 				// If job is not request more resource, then stop reclaiming.
@@ -156,7 +159,7 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				ra.reclaimForTask(ssn, stmt, task, job)
+				ra.reclaimForTask(ssn, stmt, task, job, reclaimedByNode, totalReclaimed, creditedVictims)
 			}
 
 			if ssn.JobPipelined(job) {
@@ -180,7 +183,15 @@ type nodeVictimsInfo struct {
 	availableResources *api.Resource
 }
 
-func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, job *api.JobInfo) {
+func (ra *Action) reclaimForTask(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	task *api.TaskInfo,
+	job *api.JobInfo,
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+	creditedVictims map[api.TaskID]struct{},
+) {
 	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
 	predicateHelper := util.NewPredicateHelper()
 	predicateNodes, _ := predicateHelper.PredicateNodes(task, totalNodes, ssn.PredicateForPreemptAction, ra.enablePredicateErrorCache, ssn.NodesInShard)
@@ -202,19 +213,20 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 	for _, n := range predicateNodesByShardFlattened {
 		klog.V(3).Infof("Considering Task <%s/%s> on Node <%s>.", task.Namespace, task.Name, n.Name)
 
-		// If the node already has sufficient FutureIdle resources (e.g., from prior
-		// group evictions in this session), pipeline directly without needing victims.
+		// Pipeline directly only when node FutureIdle is sufficient AND the resources
+		// are backed by reclaim credits accumulated in this scheduling cycle.
 		futureIdle := n.FutureIdle()
-		if task.InitResreq.LessEqual(futureIdle, api.Zero) {
+		if task.InitResreq.LessEqual(futureIdle, api.Zero) && hasSufficientReclaimCredits(task, n.Name, reclaimedByNode, totalReclaimed) {
 			nodeStmt := framework.NewStatement(ssn)
-			if err := nodeStmt.Pipeline(task, n.Name, false); err != nil {
+			if err := nodeStmt.Pipeline(task, n.Name, true); err != nil {
 				klog.V(3).Infof("Direct pipeline failed for Task <%s/%s> on Node <%s>: %v",
 					task.Namespace, task.Name, n.Name, err)
 				nodeStmt.DiscardWithReason("direct pipeline failed on node " + n.Name)
 			} else {
+				consumeReclaimCredits(task, n.Name, reclaimedByNode, totalReclaimed)
 				stmt.Merge(nodeStmt)
-				klog.V(3).Infof("Directly pipelined Task <%s/%s> on Node <%s> using available FutureIdle resources <%v>.",
-					task.Namespace, task.Name, n.Name, futureIdle)
+				klog.V(3).Infof("Directly pipelined Task <%s/%s> on Node <%s> using FutureIdle <%v> and reclaim credits <%v>.",
+					task.Namespace, task.Name, n.Name, futureIdle, reclaimedByNode[n.Name])
 				return
 			}
 		}
@@ -302,6 +314,9 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		evictionFailed := false
 		evictionOccurred := false
 		taskCanBePipelined := false
+		attemptReclaimedByNode := make(map[string]*api.Resource)
+		attemptTotalReclaimed := api.EmptyResource()
+		attemptCreditedVictims := make(map[api.TaskID]struct{})
 
 		for !nodeVictimsQueue.Empty() {
 			victim := nodeVictimsQueue.Pop().(*api.TaskInfo)
@@ -318,6 +333,7 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 			reclaimed.Add(victim.Resreq)
 			availableResources.Add(victim.Resreq)
 			evictionOccurred = true
+			accumulateReclaimCreditsFromVictim(ssn, victim, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims, creditedVictims)
 
 			klog.V(3).Infof("Reclaimed <%v/%v> for task <%s/%s> requested <%v> on "+
 				"Node <%s> with availableResources <%v> and reclaimed <%v>.",
@@ -357,11 +373,109 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		// Success: transfer ownership of nodeStmt's operations to the outer stmt.
 		// nodeStmt's effects (evictions, pipeline) are already live in the session.
 		stmt.Merge(nodeStmt)
+		mergeReclaimCredits(reclaimedByNode, totalReclaimed, creditedVictims, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims)
 		klog.V(3).Infof("Successfully reclaimed and pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
 			task.Namespace, task.Name, victimNode.Name, reclaimed)
 		return
 	}
 	klog.V(3).Infof("Failed to reclaim resources for Task <%s/%s> on any node.", task.Namespace, task.Name)
+}
+
+func hasSufficientReclaimCredits(
+	task *api.TaskInfo,
+	nodeName string,
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+) bool {
+	nodeCredits, found := reclaimedByNode[nodeName]
+	if !found {
+		return false
+	}
+
+	if !task.InitResreq.LessEqual(totalReclaimed, api.Zero) {
+		return false
+	}
+
+	return task.InitResreq.LessEqual(nodeCredits, api.Zero)
+}
+
+func consumeReclaimCredits(
+	task *api.TaskInfo,
+	nodeName string,
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+) {
+	if !hasSufficientReclaimCredits(task, nodeName, reclaimedByNode, totalReclaimed) {
+		return
+	}
+
+	reclaimedByNode[nodeName].Sub(task.InitResreq)
+	totalReclaimed.Sub(task.InitResreq)
+}
+
+func accumulateReclaimCreditsFromVictim(
+	ssn *framework.Session,
+	victim *api.TaskInfo,
+	attemptReclaimedByNode map[string]*api.Resource,
+	attemptTotalReclaimed *api.Resource,
+	attemptCreditedVictims map[api.TaskID]struct{},
+	creditedVictims map[api.TaskID]struct{},
+) {
+	candidates := []*api.TaskInfo{victim}
+
+	if policy, ok := victim.Pod.Annotations[framework.GroupEvictionPolicyAnnotationKey]; ok && policy == "minMember" {
+		if victimJob, found := ssn.Jobs[victim.Job]; found {
+			for _, groupTask := range victimJob.Tasks {
+				if groupTask.UID != victim.UID {
+					candidates = append(candidates, groupTask)
+				}
+			}
+		}
+	}
+
+	for _, candidate := range candidates {
+		if _, found := creditedVictims[candidate.UID]; found {
+			continue
+		}
+		if _, found := attemptCreditedVictims[candidate.UID]; found {
+			continue
+		}
+		if candidate.Status != api.Releasing {
+			continue
+		}
+		if len(candidate.NodeName) == 0 {
+			continue
+		}
+
+		if _, found := attemptReclaimedByNode[candidate.NodeName]; !found {
+			attemptReclaimedByNode[candidate.NodeName] = api.EmptyResource()
+		}
+		attemptReclaimedByNode[candidate.NodeName].Add(candidate.Resreq)
+		attemptTotalReclaimed.Add(candidate.Resreq)
+		attemptCreditedVictims[candidate.UID] = struct{}{}
+	}
+}
+
+func mergeReclaimCredits(
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+	creditedVictims map[api.TaskID]struct{},
+	attemptReclaimedByNode map[string]*api.Resource,
+	attemptTotalReclaimed *api.Resource,
+	attemptCreditedVictims map[api.TaskID]struct{},
+) {
+	for nodeName, res := range attemptReclaimedByNode {
+		if _, found := reclaimedByNode[nodeName]; !found {
+			reclaimedByNode[nodeName] = api.EmptyResource()
+		}
+		reclaimedByNode[nodeName].Add(res)
+	}
+
+	totalReclaimed.Add(attemptTotalReclaimed)
+
+	for victimID := range attemptCreditedVictims {
+		creditedVictims[victimID] = struct{}{}
+	}
 }
 
 func (ra *Action) UnInitialize() {
