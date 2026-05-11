@@ -68,6 +68,9 @@ func (ra *Action) Execute(ssn *framework.Session) {
 
 	preemptorsMap := map[api.QueueID]*util.PriorityQueue{}
 	preemptorTasks := map[api.JobID]*util.PriorityQueue{}
+	reclaimedByNode := make(map[string]*api.Resource)
+	totalReclaimed := api.EmptyResource()
+	creditedVictims := make(map[api.TaskID]struct{})
 
 	klog.V(3).Infof("There are <%d> Jobs and <%d> Queues in total for scheduling.",
 		len(ssn.Jobs), len(ssn.Queues))
@@ -126,9 +129,9 @@ func (ra *Action) Execute(ssn *framework.Session) {
 			}
 			job := jobsQ.Pop().(*api.JobInfo)
 			stmt := framework.NewStatement(ssn)
-			reclaimedByNode := make(map[string]*api.Resource)
-			totalReclaimed := api.EmptyResource()
-			creditedVictims := make(map[api.TaskID]struct{})
+			jobReclaimedByNode := cloneReclaimedByNode(reclaimedByNode)
+			jobTotalReclaimed := totalReclaimed.Clone()
+			jobCreditedVictims := cloneCreditedVictims(creditedVictims)
 
 			for {
 				// If job is not request more resource, then stop reclaiming.
@@ -167,13 +170,20 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				ra.reclaimForTask(ssn, stmt, task, job, reclaimedByNode, totalReclaimed, creditedVictims)
+				ra.reclaimForTask(ssn, stmt, task, job, jobReclaimedByNode, jobTotalReclaimed, jobCreditedVictims)
 			}
 
 			if ssn.JobPipelined(job) {
 				stmt.Commit()
+				reclaimedByNode = jobReclaimedByNode
+				totalReclaimed = jobTotalReclaimed
+				creditedVictims = jobCreditedVictims
+				klog.V(5).Infof("Committed reclaim credits after Job <%s/%s>: total credits <%v>, credited victims <%d>.",
+					job.Namespace, job.Name, totalReclaimed, len(creditedVictims))
 			} else {
 				stmt.Discard()
+				klog.V(5).Infof("Discarded reclaim credits from Job <%s/%s>: action-level total credits remain <%v>, credited victims <%d>.",
+					job.Namespace, job.Name, totalReclaimed, len(creditedVictims))
 			}
 
 			if !jobsQ.Empty() {
@@ -533,6 +543,26 @@ func reclaimCreditNodeNames(reclaimedByNode map[string]*api.Resource) []string {
 	}
 	sort.Strings(nodeNames)
 	return nodeNames
+}
+
+func cloneReclaimedByNode(reclaimedByNode map[string]*api.Resource) map[string]*api.Resource {
+	clone := make(map[string]*api.Resource, len(reclaimedByNode))
+	for nodeName, credits := range reclaimedByNode {
+		if credits == nil {
+			clone[nodeName] = nil
+			continue
+		}
+		clone[nodeName] = credits.Clone()
+	}
+	return clone
+}
+
+func cloneCreditedVictims(creditedVictims map[api.TaskID]struct{}) map[api.TaskID]struct{} {
+	clone := make(map[api.TaskID]struct{}, len(creditedVictims))
+	for victimID := range creditedVictims {
+		clone[victimID] = struct{}{}
+	}
+	return clone
 }
 
 func consumeReclaimCredits(
