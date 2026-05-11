@@ -147,24 +147,23 @@ func (ra *Action) Execute(ssn *framework.Session) {
 				klog.V(3).Infof("Considering reclaim for %d tasks of job <%s/%s>.", tasksQ.Len(), job.Namespace, job.Name)
 
 				task := tasksQ.Pop().(*api.TaskInfo)
-				if task.Status != api.Pending {
-					klog.V(5).Infof("Skip reclaim for Task <%s/%s> in Job <%s/%s> Queue <%s>: task status is <%s>, already assigned or no longer pending in this session.",
-						task.Namespace, task.Name, job.Namespace, job.Name, queue.Name, task.Status)
-					continue
-				}
 
 				if task.Pod.Spec.PreemptionPolicy != nil && *task.Pod.Spec.PreemptionPolicy == v1.PreemptNever {
 					klog.V(3).Infof("Task %s/%s cannot preempt (policy Never)", task.Namespace, task.Name)
 					continue
 				}
 
-				if !ssn.Preemptive(queue, task) {
-					klog.V(3).Infof("Queue <%s> cannot reclaim for task <%s>, skip", queue.Name, task.Name)
+				if err := ssn.PrePredicateFn(task); err != nil {
+					klog.V(3).Infof("PrePredicate failed for task %s/%s: %v", task.Namespace, task.Name, err)
 					continue
 				}
 
-				if err := ssn.PrePredicateFn(task); err != nil {
-					klog.V(3).Infof("PrePredicate failed for task %s/%s: %v", task.Namespace, task.Name, err)
+				if ra.pipelineWithIdleResources(ssn, stmt, queue, task) {
+					continue
+				}
+
+				if !ssn.Preemptive(queue, task) {
+					klog.V(3).Infof("Queue <%s> cannot reclaim for task <%s>, skip", queue.Name, task.Name)
 					continue
 				}
 
@@ -190,6 +189,68 @@ type nodeVictimsInfo struct {
 	victims            *util.PriorityQueue
 	reclaimed          *api.Resource
 	availableResources *api.Resource
+}
+
+func (ra *Action) pipelineWithIdleResources(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	queue *api.QueueInfo,
+	task *api.TaskInfo,
+) bool {
+	if !ssn.Allocatable(queue, task) {
+		klog.V(5).Infof("Skip idle pipeline for Task <%s/%s> in Queue <%s>: queue is not allocatable for request <%v>.",
+			task.Namespace, task.Name, queue.Name, task.InitResreq)
+		return false
+	}
+
+	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
+	predicateHelper := util.NewPredicateHelper()
+	predicateNodes, _ := predicateHelper.PredicateNodes(task, totalNodes, ssn.PredicateForPreemptAction, ra.enablePredicateErrorCache, ssn.NodesInShard)
+	predicateNodesByShard := util.GetPredicatedNodeByShard(predicateNodes, ssn.NodesInShard)
+	var idleCandidateNodes []*api.NodeInfo
+	for _, nodes := range predicateNodesByShard {
+		for _, node := range nodes {
+			if !task.InitResreq.LessEqual(node.Idle, api.Zero) {
+				klog.V(5).Infof("Skip idle pipeline for Task <%s/%s> on Node <%s>: requested <%v>, idle <%v>.",
+					task.Namespace, task.Name, node.Name, task.InitResreq, node.Idle)
+				continue
+			}
+			idleCandidateNodes = append(idleCandidateNodes, node)
+		}
+	}
+
+	if len(idleCandidateNodes) == 0 {
+		klog.V(5).Infof("No idle resource candidate found for Task <%s/%s>; checking reclaim eligibility.",
+			task.Namespace, task.Name)
+		return false
+	}
+
+	bestNode := idleCandidateNodes[0]
+	if len(idleCandidateNodes) > 1 {
+		nodeScores := util.PrioritizeNodes(task, idleCandidateNodes, ssn.BatchNodeOrderFn, ssn.NodeOrderMapFn, ssn.NodeOrderReduceFn)
+		bestNode = ssn.BestNodeFn(task, nodeScores)
+		if bestNode == nil {
+			bestNode, _ = util.SelectBestNodeAndScore(nodeScores)
+		}
+	}
+	if bestNode == nil {
+		klog.V(5).Infof("No best idle node selected for Task <%s/%s> from <%d> candidates; checking reclaim eligibility.",
+			task.Namespace, task.Name, len(idleCandidateNodes))
+		return false
+	}
+
+	nodeStmt := framework.NewStatement(ssn)
+	if err := nodeStmt.Pipeline(task, bestNode.Name, false); err != nil {
+		klog.V(5).Infof("Failed idle pipeline for Task <%s/%s> on Node <%s>: %v.",
+			task.Namespace, task.Name, bestNode.Name, err)
+		nodeStmt.DiscardWithReason("idle pipeline failed on node " + bestNode.Name)
+		return false
+	}
+
+	stmt.Merge(nodeStmt)
+	klog.V(3).Infof("Pipelined Task <%s/%s> on Node <%s> using idle resources <%v> without reclaim.",
+		task.Namespace, task.Name, bestNode.Name, bestNode.Idle)
+	return true
 }
 
 func (ra *Action) reclaimForTask(
