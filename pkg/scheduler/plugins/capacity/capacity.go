@@ -835,21 +835,38 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 	})
 
 	ssn.AddVictimQueueOrderFn(cp.Name(), func(l, r, preemptor interface{}) int {
-		lv := l.(*api.QueueInfo)
-		rv := r.(*api.QueueInfo)
-		pv := preemptor.(*api.QueueInfo)
+		lv := l.(*api.TaskInfo)
+		rv := r.(*api.TaskInfo)
+		pv := preemptor.(*api.TaskInfo)
 
-		lLevel := getQueueLevel(cp.queueOpts[lv.UID], cp.queueOpts[pv.UID])
-		rLevel := getQueueLevel(cp.queueOpts[rv.UID], cp.queueOpts[pv.UID])
+		// Get the queues for each task
+		// These should exist (the input should be sanitized by the caller)
+		lQ := ssn.Queues[ssn.Jobs[lv.Job].Queue]
+		rQ := ssn.Queues[ssn.Jobs[rv.Job].Queue]
+		pQ := ssn.Queues[ssn.Jobs[pv.Job].Queue]
+
+		lLevel := getQueueLevel(cp.queueOpts[lQ.UID], cp.queueOpts[pQ.UID])
+		rLevel := getQueueLevel(cp.queueOpts[rQ.UID], cp.queueOpts[pQ.UID])
 
 		if lLevel == rLevel {
 			return 0
 		}
 
+		// Calculate share on preemptor's resource dimensions
+		// For Queues that are below deserved on the preemptor's dimensions
+		// we negate the ordering to make them less likely to be chosen as victims, otherwise we keep the original order.
+		dims := pv.InitResreq.ResourceNames()
+		share := cp.calculateShareOnDimensions(cp.queueOpts[pQ.UID], &dims)
+
+		if share < 1 {
+			if lLevel > rLevel {
+				return 1
+			}
+			return -1
+		}
 		if lLevel > rLevel {
 			return -1
 		}
-
 		return 1
 	})
 
@@ -1210,6 +1227,38 @@ func updateQueueAttrShare(attr *queueAttr) {
 	}
 
 	attr.share = res
+}
+
+// calculateShareOnDimensions calculates the share of allocated resources to deserved resources on the specified dimensions.
+func (cp *capacityPlugin) calculateShareOnDimensions(attr *queueAttr, dims *api.ResourceNameList) float64 {
+	var share float64
+
+	// If no specific dimensions are provided, fallback to queue-level share which considers all resource dimensions.
+	if dims == nil || len(*dims) == 0 {
+		return attr.share
+	}
+
+	parentCheckNeeded := cp.parentBasedReclaimEnabled &&
+		attr.parentQueueID != "" &&
+		attr.parentQueueID != rootQueueID
+	for _, rn := range *dims {
+		if !attr.deserved.Has(rn) {
+			if parentCheckNeeded {
+				parentAttr := cp.queueOpts[attr.parentQueueID]
+				if parentAttr != nil && parentAttr.deserved.Has(rn) {
+					share = max(
+						share,
+						helpers.Share(parentAttr.allocated.Get(rn), parentAttr.deserved.Get(rn)),
+					)
+				}
+			}
+			share = max(share, 0)
+		} else {
+			share = max(share, helpers.Share(attr.allocated.Get(rn), attr.deserved.Get(rn)))
+		}
+	}
+
+	return share
 }
 
 // shouldSkipReclaimee checks if a reclaimee should be skipped based on whether it has

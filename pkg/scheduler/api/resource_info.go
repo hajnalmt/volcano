@@ -329,6 +329,10 @@ func (r *Resource) Multi(ratio float64) *Resource {
 	return r
 }
 
+func (r *Resource) Has(resName v1.ResourceName) bool {
+	return r.ResourceNames().Contains(ResourceNameList{resName})
+}
+
 // SetMaxResource compares with ResourceList and takes max value for each Resource.
 func (r *Resource) SetMaxResource(rr *Resource) {
 	if r == nil || rr == nil {
