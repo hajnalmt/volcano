@@ -767,7 +767,7 @@ func (ssn *Session) VictimQueueOrderFn(l, r, preemptor interface{}) bool {
 func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool {
 	lv := l.(*api.TaskInfo)
 	rv := r.(*api.TaskInfo)
-	preemptorv := preemptor.(*api.TaskInfo)
+	pv := preemptor.(*api.TaskInfo)
 
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
@@ -777,11 +777,17 @@ func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool 
 			}
 			lvJob, lvJobFound := ssn.Jobs[lv.Job]
 			rvJob, rvJobFound := ssn.Jobs[rv.Job]
-			preemptorJob, preemptorJobFound := ssn.Jobs[preemptorv.Job]
+			pJob, pJobFound := ssn.Jobs[pv.Job]
 
-			if lvJobFound && rvJobFound && preemptorJobFound && lvJob.Queue != rvJob.Queue {
-				if j := qof(ssn.Queues[lvJob.Queue], ssn.Queues[rvJob.Queue], ssn.Queues[preemptorJob.Queue]); j != 0 {
-					return j < 0
+			if lvJobFound && rvJobFound && pJobFound && lvJob.Queue != rvJob.Queue {
+				_, lQFound := ssn.Queues[lvJob.Queue]
+				_, rQFound := ssn.Queues[rvJob.Queue]
+				_, pQFound := ssn.Queues[pJob.Queue]
+
+				if lQFound && rQFound && pQFound {
+					if j := qof(lv, rv, pv); j != 0 {
+						return j < 0
+					}
 				}
 			}
 		}
@@ -792,7 +798,7 @@ func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool 
 			if !found {
 				continue
 			}
-			if j := vtof(lv, rv, preemptorv); j != 0 {
+			if j := vtof(lv, rv, pv); j != 0 {
 				return j > 0
 			}
 		}
