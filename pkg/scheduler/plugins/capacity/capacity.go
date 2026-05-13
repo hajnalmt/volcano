@@ -132,7 +132,7 @@ func (cp *capacityPlugin) OnSessionOpen(ssn *framework.Session) {
 			return victims, util.Reject
 		}
 
-		reclaimeesQueue := ssn.BuildVictimsPriorityQueue(reclaimees, reclaimer)
+		reclaimeesQueue := ssn.BuildAumovioVictimPriorityQueue(reclaimees, reclaimer)
 		for !reclaimeesQueue.Empty() {
 			reclaimee := reclaimeesQueue.Pop().(*api.TaskInfo)
 			job := ssn.Jobs[reclaimee.Job]

@@ -319,7 +319,20 @@ func (ra *Action) reclaimForTask(
 			continue
 		}
 
+		// Log all potential reclaimees before filtering
+		reclaimeeNames := make([]string, 0, len(reclaimees))
+		for _, v := range reclaimees {
+			reclaimeeNames = append(reclaimeeNames, v.Namespace+"/"+v.Name)
+		}
+		klog.V(4).Infof("Potential reclaimees on Node <%s>: %v", n.Name, reclaimeeNames)
+
 		victims := ssn.Reclaimable(task, reclaimees)
+
+		victimNamesAfter := make([]string, 0, len(victims))
+		for _, v := range victims {
+			victimNamesAfter = append(victimNamesAfter, v.Namespace+"/"+v.Name)
+		}
+		klog.V(4).Infof("Victims after Reclaimable on Node <%s>: %v", n.Name, victimNamesAfter)
 
 		if err := util.ValidateVictims(task, n, victims); err != nil {
 			klog.V(3).Infof("No validated victims on Node <%s>: %v", n.Name, err)
@@ -440,7 +453,7 @@ func (ra *Action) reclaimForTask(
 		// nodeStmt's effects (evictions, pipeline) are already live in the session.
 		stmt.Merge(nodeStmt)
 		mergeReclaimCredits(reclaimedByNode, totalReclaimed, creditedVictims, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims)
-		klog.V(3).Infof("Successfully reclaimed and pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
+		klog.V(3).Infof("Successfully pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
 			task.Namespace, task.Name, victimNode.Name, reclaimed)
 		return
 	}
