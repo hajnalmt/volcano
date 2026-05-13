@@ -858,6 +858,8 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 		dims := pv.InitResreq.ResourceNames()
 		share := cp.calculateShareOnDimensions(cp.queueOpts[pQ.UID], &dims)
 
+		klog.V(5).Infof("Comparing victim tasks <%s/%s> and <%s/%s> for preemptor <%s/%s>.", lv.Namespace, lv.Name, rv.Namespace, rv.Name, pv.Namespace, pv.Name)
+		klog.V(5).Infof("share on preemptor's dimensions is %f, lLevel: %d, rLevel: %d", share, lLevel, rLevel)
 		if share < 1 {
 			if lLevel > rLevel {
 				return 1
