@@ -855,17 +855,29 @@ func (cp *capacityPlugin) buildHierarchicalQueueAttrs(ssn *framework.Session) bo
 		// Calculate share on preemptor's resource dimensions
 		// For Queues that are below deserved on the preemptor's dimensions
 		// we negate the ordering to make them less likely to be chosen as victims, otherwise we keep the original order.
-		dims := pv.InitResreq.ResourceNames()
-		share := cp.calculateShareOnDimensions(cp.queueOpts[pQ.UID], &dims)
 
-		klog.V(5).Infof("Comparing victim tasks <%s/%s> and <%s/%s> for preemptor <%s/%s>.", lv.Namespace, lv.Name, rv.Namespace, rv.Name, pv.Namespace, pv.Name)
-		klog.V(5).Infof("share on preemptor's dimensions is %f, lLevel: %d, rLevel: %d", share, lLevel, rLevel)
-		if share < 1 {
-			if lLevel > rLevel {
+		klog.V(5).Infof("Comparing victim tasks left: <%s/%s> (level %d) and right: <%s/%s> (level %d) for preemptor <%s/%s>.",
+			lv.Namespace, lv.Name, lLevel, rv.Namespace, rv.Name, rLevel, pv.Namespace, pv.Name)
+
+		// This hack works only for parentBased reclaim with only 2 deep hierarchical queues as the max level then is 1
+		if lLevel == 1 {
+			shareL := cp.calculateShareOnDimensionsWithPreemptor(cp.queueOpts[lQ.UID], pv)
+			klog.V(5).Infof("ShareL on preemptor's dimensions is %f.", shareL)
+			if shareL > 1 {
+				return -1
+			} else {
 				return 1
 			}
-			return -1
+		} else if rLevel == 1 {
+			shareR := cp.calculateShareOnDimensionsWithPreemptor(cp.queueOpts[rQ.UID], pv)
+			klog.V(5).Infof("ShareR on preemptor's dimensions is %f.", shareR)
+			if shareR > 1 {
+				return 1
+			} else {
+				return -1
+			}
 		}
+
 		if lLevel > rLevel {
 			return -1
 		}
@@ -1231,32 +1243,35 @@ func updateQueueAttrShare(attr *queueAttr) {
 	attr.share = res
 }
 
-// calculateShareOnDimensions calculates the share of allocated resources to deserved resources on the specified dimensions.
-func (cp *capacityPlugin) calculateShareOnDimensions(attr *queueAttr, dims *api.ResourceNameList) float64 {
+// calculateShareOnDimensions calculates the share of allocated resources to deserved resources with the preemptor's initial resource request.
+// This is needed for use cases where the queue order needs to be decided based on the share of a parent queue.
+func (cp *capacityPlugin) calculateShareOnDimensionsWithPreemptor(attr *queueAttr, pv *api.TaskInfo) float64 {
 	var share float64
 
+	dims := pv.InitResreq.ResourceNames()
 	// If no specific dimensions are provided, fallback to queue-level share which considers all resource dimensions.
-	if dims == nil || len(*dims) == 0 {
+	if dims == nil || len(dims) == 0 {
 		return attr.share
 	}
 
 	parentCheckNeeded := cp.parentBasedReclaimEnabled &&
 		attr.parentQueueID != "" &&
 		attr.parentQueueID != rootQueueID
-	for _, rn := range *dims {
-		if !attr.deserved.Has(rn) {
-			if parentCheckNeeded {
-				parentAttr := cp.queueOpts[attr.parentQueueID]
-				if parentAttr != nil && parentAttr.deserved.Has(rn) {
-					share = max(
-						share,
-						helpers.Share(parentAttr.allocated.Get(rn), parentAttr.deserved.Get(rn)),
-					)
-				}
+	for _, rn := range dims {
+		if parentCheckNeeded {
+			parentAttr := cp.queueOpts[attr.parentQueueID]
+			klog.V(5).Infof("Parent queue <%s> share on preemptor's dimension <%s>: deserved <%v>, allocated <%v>, preemptor InitResreq <%v>",
+				parentAttr.name, rn, parentAttr.deserved.Get(rn), parentAttr.allocated.Get(rn), pv.InitResreq.Get(rn))
+			if parentAttr != nil && parentAttr.deserved.Has(rn) && parentAttr.deserved.Get(rn) > 0 {
+				share = max(
+					share,
+					helpers.ProperShare(parentAttr.allocated.Get(rn)+pv.InitResreq.Get(rn), parentAttr.deserved.Get(rn)),
+				)
 			}
+		} else if !attr.deserved.Has(rn) {
 			share = max(share, 0)
 		} else {
-			share = max(share, helpers.Share(attr.allocated.Get(rn), attr.deserved.Get(rn)))
+			share = max(share, helpers.ProperShare(attr.allocated.Get(rn)+pv.InitResreq.Get(rn), attr.deserved.Get(rn)))
 		}
 	}
 
