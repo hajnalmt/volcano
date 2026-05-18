@@ -227,28 +227,32 @@ func (pp *PredicatesPlugin) OnSessionOpen(ssn *framework.Session) {
 			// run reserve plugins
 			pp.runReservePlugins(ssn, event)
 			if event.Err != nil {
-				return
-			}
-			//predicate gpu sharing
-			for _, val := range api.RegisteredDevices {
-				if devices, ok := nodeInfo.Others[val].(api.Devices); ok {
-					if api.IsNilDevice(devices) {
-						continue
-					}
-					if !devices.HasDeviceRequest(pod) {
-						continue
-					}
+				// Reserve failed; skip device allocation but still update the node snapshot below.
+				klog.V(3).Infof("predicates, Reserve failed for pod %s/%s on node %s, skipping device allocation: %v",
+					pod.Namespace, pod.Name, nodeName, event.Err)
+			} else {
+				//predicate gpu sharing
+				for _, val := range api.RegisteredDevices {
+					if devices, ok := nodeInfo.Others[val].(api.Devices); ok {
+						if api.IsNilDevice(devices) {
+							continue
+						}
+						if !devices.HasDeviceRequest(pod) {
+							continue
+						}
 
-					err := devices.Allocate(ssn.KubeClient(), pod)
-					if err != nil {
-						klog.Errorf("AllocateToPod failed %s", err.Error())
-						event.Err = err
-						return
+						err := devices.Allocate(ssn.KubeClient(), pod)
+						if err != nil {
+							klog.Errorf("AllocateToPod failed %s", err.Error())
+							event.Err = err
+							return
+						}
+					} else {
+						klog.Warningf("Devices %s assertion conversion failed, skip", val)
 					}
-				} else {
-					klog.Warningf("Devices %s assertion conversion failed, skip", val)
 				}
 			}
+			// Always add pod to the node snapshot regardless of Reserve plugin outcome.
 			// ignore this err since apiserver doesn't properly validate affinity terms
 			// and we can't fix the validation for backwards compatibility.
 			podInfo, _ := k8sframework.NewPodInfo(pod)
@@ -296,7 +300,7 @@ func (pp *PredicatesPlugin) OnSessionOpen(ssn *framework.Session) {
 			}
 
 			if err = node.RemovePod(klog.FromContext(context.TODO()), pod); err != nil {
-				klog.Errorf("predicates, remove pod %s/%s from node [%s] error: %v", pod.Namespace, pod.Name, nodeName, err)
+				klog.V(3).Infof("predicates, remove pod %s/%s from node [%s] (may already be absent during rollback): %v", pod.Namespace, pod.Name, nodeName, err)
 				return
 			}
 			klog.V(4).Infof("predicates, update pod %s/%s deallocate from node [%s]", pod.Namespace, pod.Name, nodeName)
