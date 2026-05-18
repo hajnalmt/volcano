@@ -44,22 +44,29 @@ const (
 	Allocate
 )
 
+const (
+	GroupEvictionPolicyAnnotationKey = "volcano.sh/group-eviction-policy"
+)
+
 type operation struct {
-	name   Operation
-	task   *api.TaskInfo
-	reason string
+	name             Operation
+	task             *api.TaskInfo
+	reason           string
+	evictionOccurred bool // tracks whether eviction occurred for Pipeline ops
 }
 
 // Statement structure
 type Statement struct {
 	operations []operation
 	ssn        *Session
+	lastOps    map[api.TaskID]Operation
 }
 
 // NewStatement returns new statement object
 func NewStatement(ssn *Session) *Statement {
 	return &Statement{
-		ssn: ssn,
+		ssn:     ssn,
+		lastOps: make(map[api.TaskID]Operation),
 	}
 }
 
@@ -68,8 +75,25 @@ func (s *Statement) Operations() []operation {
 	return s.operations
 }
 
+// Last Operations
+func (s *Statement) LastOperations() map[api.TaskID]Operation {
+	return s.lastOps
+}
+
 // Evict the pod
-func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) {
+func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) error {
+	if lastOp, exists := s.lastOps[reclaimee.UID]; exists && lastOp == Evict {
+		// Skip this eviction
+		return nil
+	}
+	previousStatus := reclaimee.Status
+	queue := ""
+	jobName := string(reclaimee.Job)
+	if job, found := s.ssn.Jobs[reclaimee.Job]; found {
+		queue = string(job.Queue)
+		jobName = job.Name
+	}
+
 	// Update status in session
 	if job, found := s.ssn.Jobs[reclaimee.Job]; found {
 		job.UpdateTaskStatus(reclaimee, api.Releasing)
@@ -97,6 +121,26 @@ func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) {
 		task:   reclaimee,
 		reason: reason,
 	})
+	s.lastOps[reclaimee.UID] = Evict
+	klog.V(5).Infof("Evicted Task <%s/%s> for reason <%s> in Job <%s> Queue <%s> on Node <%s>: status <%s> -> <%s>, resource <%v>.",
+		reclaimee.Namespace, reclaimee.Name, reason, jobName, queue, reclaimee.NodeName, previousStatus, reclaimee.Status, reclaimee.Resreq)
+
+	// Group-eviction-policy support
+	if reason != "group-eviction-policy" {
+		if policy, ok := reclaimee.Pod.Annotations[GroupEvictionPolicyAnnotationKey]; ok && policy == "minMember" {
+			// Find all tasks in the same Job (PodGroup)
+			if job, found := s.ssn.Jobs[reclaimee.Job]; found {
+				for _, task := range job.Tasks {
+					if task.UID != reclaimee.UID {
+						// Evict other tasks in the group
+						s.Evict(task, "group-eviction-policy")
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (s *Statement) evict(reclaimee *api.TaskInfo, reason string) error {
@@ -104,6 +148,8 @@ func (s *Statement) evict(reclaimee *api.TaskInfo, reason string) error {
 		if e := s.unevict(reclaimee); e != nil {
 			klog.Errorf("Faled to unevict task <%v/%v>: %v.", reclaimee.Namespace, reclaimee.Name, e)
 		}
+		// If eviction failed we should try again next time
+		delete(s.lastOps, reclaimee.UID)
 		return err
 	}
 
@@ -149,6 +195,10 @@ func (s *Statement) Pipeline(task *api.TaskInfo, hostname string, evictionOccurr
 	}()
 
 	errInfos := make([]error, 0)
+	if lastOp, exists := s.lastOps[task.UID]; exists && lastOp == Pipeline {
+		return nil
+	}
+
 	job, found := s.ssn.Jobs[task.Job]
 	if found {
 		job.UpdateTaskStatus(task, api.Pipelined)
@@ -196,9 +246,11 @@ func (s *Statement) Pipeline(task *api.TaskInfo, hostname string, evictionOccurr
 			task.Namespace, task.Name, hostname, len(errInfos))
 	} else {
 		s.operations = append(s.operations, operation{
-			name: Pipeline,
-			task: task,
+			name:             Pipeline,
+			task:             task,
+			evictionOccurred: evictionOccurred,
 		})
+		s.lastOps[task.UID] = Pipeline
 	}
 
 	return nil
@@ -212,6 +264,10 @@ func (s *Statement) UnPipeline(task *api.TaskInfo) error {
 }
 
 func (s *Statement) unPipeline(task *api.TaskInfo) error {
+	if lastOp, exists := s.lastOps[task.UID]; exists && lastOp == Pipeline {
+		delete(s.lastOps, task.UID)
+	}
+
 	job, found := s.ssn.Jobs[task.Job]
 	if found {
 		job.UpdateTaskStatus(task, api.Pending)
@@ -236,6 +292,7 @@ func (s *Statement) unPipeline(task *api.TaskInfo) error {
 			eh.DeallocateFunc(eventInfo)
 		}
 	}
+
 	task.NodeName = ""
 	task.JobAllocatedHyperNode = ""
 
@@ -255,7 +312,10 @@ func (s *Statement) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err er
 	errInfos := make([]error, 0)
 	hostname := nodeInfo.Name
 	task.Pod.Spec.NodeName = hostname
-
+	if lastOp, exists := s.lastOps[task.UID]; exists && lastOp == Allocate {
+		// Skip this eviction
+		return nil
+	}
 	// Only update status in session
 	job, found := s.ssn.Jobs[task.Job]
 	if found {
@@ -309,9 +369,18 @@ func (s *Statement) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err er
 			name: Allocate,
 			task: task,
 		})
+		s.lastOps[task.UID] = Allocate
 	}
 
 	return nil
+}
+
+// UnAllocate the pod for task
+func (s *Statement) UnAllocate(task *api.TaskInfo) error {
+	if lastOp, exists := s.lastOps[task.UID]; exists && lastOp == Allocate {
+		delete(s.lastOps, task.UID)
+	}
+	return s.unallocate(task)
 }
 
 func (s *Statement) allocate(task *api.TaskInfo) error {
@@ -363,7 +432,18 @@ func (s *Statement) unallocate(task *api.TaskInfo) error {
 
 // Discard operation for evict, pipeline and allocate
 func (s *Statement) Discard() {
-	klog.V(3).Info("Discarding operations ...")
+	s.DiscardWithReason("")
+}
+
+// DiscardWithReason discards all operations with a descriptive reason for logging.
+// Use this instead of Discard() when you want to clarify the intent in logs
+// (e.g., distinguishing temporary rollbacks from real failures).
+func (s *Statement) DiscardWithReason(reason string) {
+	if reason != "" {
+		klog.V(3).Infof("Discarding operations (%s) ...", reason)
+	} else {
+		klog.V(3).Info("Discarding operations ...")
+	}
 	for i := len(s.operations) - 1; i >= 0; i-- {
 		op := s.operations[i]
 		op.task.GenerateLastTxContext()
@@ -412,6 +492,8 @@ func (s *Statement) Commit() {
 		}
 	}
 	s.operations = nil
+	// Clear
+	s.lastOps = make(map[api.TaskID]Operation)
 }
 
 // Merge transfers operations from the given statements into this statement.
