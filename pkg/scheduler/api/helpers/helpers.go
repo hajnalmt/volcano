@@ -91,3 +91,19 @@ func Share(l, r float64) float64 {
 
 	return share
 }
+
+// ProperShare
+func ProperShare(l, r float64) float64 {
+	var share float64
+	if r == 0 {
+		if l == 0 {
+			share = 0
+		} else {
+			share = math.MaxFloat64
+		}
+	} else {
+		share = l / r
+	}
+
+	return share
+}
