@@ -46,6 +46,10 @@ func (ssn *Session) AddVictimQueueOrderFn(name string, vcf api.VictimCompareFn) 
 	ssn.victimQueueOrderFns[name] = vcf
 }
 
+func (ssn *Session) AddVictimTaskOrderFn(name string, vtf api.VictimTaskCompareFn) {
+	ssn.victimTaskOrderFns[name] = vtf
+}
+
 // AddClusterOrderFn add queue order function
 func (ssn *Session) AddClusterOrderFn(name string, qf api.CompareFn) {
 	ssn.clusterOrderFns[name] = qf
@@ -814,6 +818,50 @@ func (ssn *Session) VictimQueueOrderFn(l, r, preemptor interface{}) bool {
 	return !ssn.QueueOrderFn(l, r)
 }
 
+// VictimTaskOrderFn invoke victimtaskorder function of the plugins
+func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool {
+	lv := l.(*api.TaskInfo)
+	rv := r.(*api.TaskInfo)
+	pv := preemptor.(*api.TaskInfo)
+
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			qof, found := ssn.victimQueueOrderFns[plugin.Name]
+			if !found {
+				continue
+			}
+			lvJob, lvJobFound := ssn.Jobs[lv.Job]
+			rvJob, rvJobFound := ssn.Jobs[rv.Job]
+			pJob, pJobFound := ssn.Jobs[pv.Job]
+
+			if lvJobFound && rvJobFound && pJobFound && lvJob.Queue != rvJob.Queue {
+				_, lQFound := ssn.Queues[lvJob.Queue]
+				_, rQFound := ssn.Queues[rvJob.Queue]
+				_, pQFound := ssn.Queues[pJob.Queue]
+
+				if lQFound && rQFound && pQFound {
+					if j := qof(lv, rv, pv); j != 0 {
+						return j < 0
+					}
+				}
+			}
+		}
+	}
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			vtof, found := ssn.victimTaskOrderFns[plugin.Name]
+			if !found {
+				continue
+			}
+			if j := vtof(lv, rv, pv); j != 0 {
+				return j > 0
+			}
+		}
+	}
+
+	return !ssn.TaskOrderFn(lv, rv)
+}
+
 // TaskCompareFns invoke taskorder function of the plugins
 func (ssn *Session) TaskCompareFns(l, r interface{}) int {
 	for _, tier := range ssn.Tiers {
@@ -836,6 +884,18 @@ func (ssn *Session) TaskCompareFns(l, r interface{}) int {
 
 // TaskOrderFn invoke taskorder function of the plugins
 func (ssn *Session) TaskOrderFn(l, r interface{}) bool {
+	if res := ssn.TaskCompareFns(l, r); res != 0 {
+		return res < 0
+	}
+
+	// If no task order funcs, order task by default func.
+	lv := l.(*api.TaskInfo)
+	rv := r.(*api.TaskInfo)
+	return helpers.CompareTask(lv, rv)
+}
+
+// TaskOrderFn invoke taskorder function of the plugins
+func (ssn *Session) Victim(l, r interface{}) bool {
 	if res := ssn.TaskCompareFns(l, r); res != 0 {
 		return res < 0
 	}
@@ -1207,6 +1267,21 @@ func (ssn *Session) BuildVictimsPriorityQueue(victims []*api.TaskInfo, preemptor
 		}
 
 		return jobThenTaskOrder(lvJob, rvJob, l, r)
+	})
+	for _, victim := range victims {
+		victimsQueue.Push(victim)
+	}
+	return victimsQueue
+}
+
+// BuildVictimsPriorityQueue returns a priority queue with victims sorted by:
+// if victims has same job id, sorted by !ssn.TaskOrderFn
+// if victims has different job id, sorted by !ssn.JobOrderFn
+func (ssn *Session) BuildAumovioVictimPriorityQueue(victims []*api.TaskInfo, preemptor *api.TaskInfo) *util.PriorityQueue {
+	victimsQueue := util.NewPriorityQueue(func(l, r interface{}) bool {
+		lv := l.(*api.TaskInfo)
+		rv := r.(*api.TaskInfo)
+		return ssn.VictimQueueAndTaskOrderFn(lv, rv, preemptor)
 	})
 	for _, victim := range victims {
 		victimsQueue.Push(victim)
