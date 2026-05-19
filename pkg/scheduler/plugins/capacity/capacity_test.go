@@ -471,6 +471,12 @@ func TestEnqueueAndAllocatable(t *testing.T) {
 }
 
 func Test_capacityPlugin_OnSessionOpenWithHierarchy(t *testing.T) {
+	// TODO: Revisit the bind expectations in this suite after the Aumovio
+	// reclaim credit flow. Reclaim can now pipeline tasks before allocate runs,
+	// and allocate does not prioritize already-pipelined tasks for immediate
+	// same-session binding. In those cases the next scheduler session is expected
+	// to continue from the nominated/pipelined node state, so tests that currently
+	// wait for a Bind request may need to assert ExpectPipeLined instead.
 	plugins := map[string]framework.PluginBuilder{PluginName: New, predicates.PluginName: predicates.New, gang.PluginName: gang.New, priority.PluginName: priority.New}
 	trueValue := true
 	actions := []framework.Action{enqueue.New(), reclaim.New(), allocate.New()}

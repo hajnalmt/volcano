@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+OUTPUT_DIR=_output
 BIN_DIR=_output/bin
 RELEASE_DIR=_output/release
 REPO_PATH=volcano.sh/volcano
