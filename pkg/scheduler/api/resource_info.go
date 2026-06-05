@@ -329,6 +329,29 @@ func (r *Resource) Multi(ratio float64) *Resource {
 	return r
 }
 
+func (r *Resource) Has(resName v1.ResourceName) bool {
+	return r.ResourceNamesWithZeroScalars().Contains(ResourceNameList{resName})
+}
+
+// ResourceNamesWithZeroScalars returns all resource types including those with zero scalar values
+func (r *Resource) ResourceNamesWithZeroScalars() ResourceNameList {
+	resNames := ResourceNameList{}
+
+	if r.MilliCPU >= minResource {
+		resNames = append(resNames, v1.ResourceCPU)
+	}
+
+	if r.Memory >= minResource {
+		resNames = append(resNames, v1.ResourceMemory)
+	}
+
+	for rName, _ := range r.ScalarResources {
+		resNames = append(resNames, rName)
+	}
+
+	return resNames
+}
+
 // SetMaxResource compares with ResourceList and takes max value for each Resource.
 func (r *Resource) SetMaxResource(rr *Resource) {
 	if r == nil || rr == nil {
