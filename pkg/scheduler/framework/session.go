@@ -112,6 +112,7 @@ type Session struct {
 	jobOrderFns         map[string]api.CompareFn
 	queueOrderFns       map[string]api.CompareFn
 	victimQueueOrderFns map[string]api.VictimCompareFn
+	victimTaskOrderFns  map[string]api.VictimTaskCompareFn
 	taskOrderFns        map[string]api.CompareFn
 	clusterOrderFns     map[string]api.CompareFn
 	predicateFns        map[string]api.PredicateFn
@@ -156,6 +157,16 @@ type Session struct {
 	cycleStatesMap sync.Map
 
 	NodesInShard sets.Set[string]
+
+	// EvictionCreditsByNode tracks resources freed by committed evictions in this
+	// scheduling cycle, keyed by node name. Shared across actions so that e.g.
+	// preempt can pipeline onto nodes where reclaim already evicted victims.
+	EvictionCreditsByNode map[string]*api.Resource
+	// TotalEvictionCredits is the cycle-wide sum of EvictionCreditsByNode.
+	TotalEvictionCredits *api.Resource
+	// CreditedEvictions is the set of evicted task UIDs already counted in the
+	// credit totals; used to prevent double-counting across actions.
+	CreditedEvictions map[api.TaskID]struct{}
 }
 
 func openSession(cache cache.Cache) *Session {
@@ -176,6 +187,10 @@ func openSession(cache cache.Cache) *Session {
 		},
 		DirtyJobs:      sets.New[api.JobID](),
 		Jobs:           map[api.JobID]*api.JobInfo{},
+
+		EvictionCreditsByNode: map[string]*api.Resource{},
+		TotalEvictionCredits:  api.EmptyResource(),
+		CreditedEvictions:     map[api.TaskID]struct{}{},
 		Nodes:          map[string]*api.NodeInfo{},
 		CSINodesStatus: map[string]*api.CSINodeStatusInfo{},
 		RevocableNodes: map[string]*api.NodeInfo{},
@@ -185,6 +200,7 @@ func openSession(cache cache.Cache) *Session {
 		jobOrderFns:                   map[string]api.CompareFn{},
 		queueOrderFns:                 map[string]api.CompareFn{},
 		victimQueueOrderFns:           map[string]api.VictimCompareFn{},
+		victimTaskOrderFns:            map[string]api.VictimTaskCompareFn{},
 		taskOrderFns:                  map[string]api.CompareFn{},
 		clusterOrderFns:               map[string]api.CompareFn{},
 		predicateFns:                  map[string]api.PredicateFn{},
