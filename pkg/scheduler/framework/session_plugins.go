@@ -835,12 +835,17 @@ func (ssn *Session) VictimQueueAndTaskOrderFn(l, r, preemptor interface{}) bool 
 			pJob, pJobFound := ssn.Jobs[pv.Job]
 
 			if lvJobFound && rvJobFound && pJobFound && lvJob.Queue != rvJob.Queue {
-				_, lQFound := ssn.Queues[lvJob.Queue]
-				_, rQFound := ssn.Queues[rvJob.Queue]
-				_, pQFound := ssn.Queues[pJob.Queue]
+				lQueue, lQFound := ssn.Queues[lvJob.Queue]
+				rQueue, rQFound := ssn.Queues[rvJob.Queue]
+				pQueue, pQFound := ssn.Queues[pJob.Queue]
 
 				if lQFound && rQFound && pQFound {
-					if j := qof(lv, rv, pv); j != 0 {
+					// victimQueueOrderFns compare queues, so pass the victims'
+					// queues rather than the tasks themselves. The old branch
+					// relied on parent-based reclaim rewriting the capacity
+					// victimQueueOrderFn to accept tasks; that feature is dropped
+					// on 1.15, so the upstream queue-based signature applies here.
+					if j := qof(lQueue, rQueue, pQueue); j != 0 {
 						return j < 0
 					}
 				}

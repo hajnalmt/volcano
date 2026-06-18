@@ -68,9 +68,6 @@ func (ra *Action) Execute(ssn *framework.Session) {
 
 	preemptorsMap := map[api.QueueID]*util.PriorityQueue{}
 	preemptorTasks := map[api.JobID]*util.PriorityQueue{}
-	reclaimedByNode := make(map[string]*api.Resource)
-	totalReclaimed := api.EmptyResource()
-	creditedVictims := make(map[api.TaskID]struct{})
 
 	klog.V(3).Infof("There are <%d> Jobs and <%d> Queues in total for scheduling.",
 		len(ssn.Jobs), len(ssn.Queues))
@@ -129,9 +126,9 @@ func (ra *Action) Execute(ssn *framework.Session) {
 			}
 			job := jobsQ.Pop().(*api.JobInfo)
 			stmt := framework.NewStatement(ssn)
-			jobReclaimedByNode := cloneReclaimedByNode(reclaimedByNode)
-			jobTotalReclaimed := totalReclaimed.Clone()
-			jobCreditedVictims := cloneCreditedVictims(creditedVictims)
+			jobReclaimedByNode := cloneReclaimedByNode(ssn.EvictionCreditsByNode)
+			jobTotalReclaimed := ssn.TotalEvictionCredits.Clone()
+			jobCreditedVictims := cloneCreditedVictims(ssn.CreditedEvictions)
 
 			for {
 				// If job is not request more resource, then stop reclaiming.
@@ -170,20 +167,20 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				ra.reclaimForTask(ssn, stmt, task, job, jobReclaimedByNode, jobTotalReclaimed, jobCreditedVictims)
+				ra.reclaimForTask(ssn, stmt, task, job, jobReclaimedByNode, jobTotalReclaimed, jobCreditedVictims, ssn.CreditedEvictions)
 			}
 
 			if ssn.JobPipelined(job) {
 				stmt.Commit()
-				reclaimedByNode = jobReclaimedByNode
-				totalReclaimed = jobTotalReclaimed
-				creditedVictims = jobCreditedVictims
+				ssn.EvictionCreditsByNode = jobReclaimedByNode
+				ssn.TotalEvictionCredits = jobTotalReclaimed
+				ssn.CreditedEvictions = jobCreditedVictims
 				klog.V(5).Infof("Committed reclaim credits after Job <%s/%s>: total credits <%v>, credited victims <%d>.",
-					job.Namespace, job.Name, totalReclaimed, len(creditedVictims))
+					job.Namespace, job.Name, ssn.TotalEvictionCredits, len(ssn.CreditedEvictions))
 			} else {
 				stmt.Discard()
-				klog.V(5).Infof("Discarded reclaim credits from Job <%s/%s>: action-level total credits remain <%v>, credited victims <%d>.",
-					job.Namespace, job.Name, totalReclaimed, len(creditedVictims))
+				klog.V(5).Infof("Discarded reclaim credits from Job <%s/%s>: session-level total credits remain <%v>, credited victims <%d>.",
+					job.Namespace, job.Name, ssn.TotalEvictionCredits, len(ssn.CreditedEvictions))
 			}
 
 			if !jobsQ.Empty() {
@@ -271,6 +268,7 @@ func (ra *Action) reclaimForTask(
 	reclaimedByNode map[string]*api.Resource,
 	totalReclaimed *api.Resource,
 	creditedVictims map[api.TaskID]struct{},
+	committedEvictions map[api.TaskID]struct{},
 ) {
 	if pipelineWithReclaimCredits(ssn, stmt, task, reclaimedByNode, totalReclaimed) {
 		return
@@ -412,7 +410,7 @@ func (ra *Action) reclaimForTask(
 			reclaimed.Add(victim.Resreq)
 			availableResources.Add(victim.Resreq)
 			evictionOccurred = true
-			accumulateReclaimCreditsFromVictim(ssn, victim, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims, creditedVictims)
+			accumulateReclaimCreditsFromVictim(ssn, victim, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims, committedEvictions)
 
 			klog.V(3).Infof("Reclaimed <%v/%v> for task <%s/%s> requested <%v> on "+
 				"Node <%s> with availableResources <%v> and reclaimed <%v>.",

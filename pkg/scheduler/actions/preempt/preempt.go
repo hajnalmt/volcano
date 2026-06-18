@@ -311,6 +311,25 @@ func (pmpt *Action) preempt(
 	predicateNodes, _ := predicateHelper.PredicateNodes(preemptor, allNodes, ssn.PredicateForPreemptAction, pmpt.enablePredicateErrorCache, ssn.NodesInShard)
 
 	candidateNodes := util.GetPredicatedNodeByShard(predicateNodes, ssn.NodesInShard)
+
+	job, found := ssn.Jobs[preemptor.Job]
+	if !found {
+		return false, fmt.Errorf("not found Job %s in Session", preemptor.Job)
+	}
+	currentQueue := ssn.Queues[job.Queue]
+
+	// Fast path 1: idle resources, no eviction needed.
+	// Applies when the task requests no dimension that the queue meters, so
+	// Allocatable is irrelevant (e.g. MPI Launcher on a GPU-only queue).
+	if pmpt.pipelineWithIdleResources(ssn, stmt, preemptor, currentQueue, candidateNodes) {
+		return true, nil
+	}
+
+	// Fast path 2: eviction credits already paid by a prior action/job this cycle.
+	if pmpt.pipelineWithEvictionCredits(ssn, stmt, preemptor, candidateNodes) {
+		return true, nil
+	}
+
 	var preemptSuccess bool
 	var err error
 	//try to preempt in order if multiple candidate Nodes group with priority exist
@@ -319,30 +338,147 @@ func (pmpt *Action) preempt(
 			if preemptSuccess, err = pmpt.topologyAwarePreempt(ssn, stmt, preemptor, filter, nodes); preemptSuccess {
 				break
 			}
-		} else if preemptSuccess, err = pmpt.normalPreempt(ssn, stmt, preemptor, filter, nodes); preemptSuccess {
+		} else if preemptSuccess, err = pmpt.normalPreempt(ssn, stmt, preemptor, currentQueue, filter, nodes); preemptSuccess {
 			break
 		}
 	}
 	return preemptSuccess, err
 }
 
+// pipelineWithIdleResources pipelines preemptor directly onto a node with
+// enough idle resources, bypassing the Allocatable queue check. This is
+// correct only when the task requests no resource dimension that the queue
+// meters (checked via api.Intersection against the queue's Deserved, Capability
+// and Guarantee), so the queue usage is unaffected by scheduling this task.
+// Concrete case: MPI Launcher requesting CPU/mem only on a GPU-only queue.
+func (pmpt *Action) pipelineWithIdleResources(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	preemptor *api.TaskInfo,
+	currentQueue *api.QueueInfo,
+	candidateNodesByShard [2][]*api.NodeInfo,
+) bool {
+	// Determine the dimensions the queue meters. A queue may constrain resources
+	// through any of Deserved, Capability, or Guarantee; the capacity/proportion
+	// plugins derive their Allocatable check from these. If the preemptor requests
+	// any metered dimension, Allocatable must be honored and the idle fast path
+	// cannot apply.
+	queueMetered := api.NewResource(currentQueue.Queue.Spec.Deserved)
+	queueMetered.Add(api.NewResource(currentQueue.Queue.Spec.Capability))
+	queueMetered.Add(api.NewResource(currentQueue.Queue.Spec.Guarantee.Resource))
+	if len(api.Intersection(preemptor.InitResreq, queueMetered)) > 0 {
+		// Task consumes at least one queue-metered dimension; Allocatable must apply.
+		return false
+	}
+
+	for _, nodes := range candidateNodesByShard {
+		var idleCandidates []*api.NodeInfo
+		for _, node := range nodes {
+			if preemptor.InitResreq.LessEqual(node.Idle, api.Zero) {
+				idleCandidates = append(idleCandidates, node)
+			}
+		}
+		if len(idleCandidates) == 0 {
+			continue
+		}
+
+		bestNode := idleCandidates[0]
+		if len(idleCandidates) > 1 {
+			nodeScores := util.PrioritizeNodes(preemptor, idleCandidates, ssn.BatchNodeOrderFn, ssn.NodeOrderMapFn, ssn.NodeOrderReduceFn)
+			bestNode = ssn.BestNodeFn(preemptor, nodeScores)
+			if bestNode == nil {
+				bestNode, _ = util.SelectBestNodeAndScore(nodeScores)
+			}
+		}
+		if bestNode == nil {
+			continue
+		}
+
+		nodeStmt := framework.NewStatement(ssn)
+		if err := nodeStmt.Pipeline(preemptor, bestNode.Name, false); err != nil {
+			klog.V(5).Infof("Idle pipeline failed for Task <%s/%s> on Node <%s>: %v.",
+				preemptor.Namespace, preemptor.Name, bestNode.Name, err)
+			nodeStmt.Discard()
+			continue
+		}
+		stmt.Merge(nodeStmt)
+		klog.V(3).Infof("Pipelined Task <%s/%s> on Node <%s> using idle resources (queue-unmetered dimensions).",
+			preemptor.Namespace, preemptor.Name, bestNode.Name)
+		return true
+	}
+	return false
+}
+
+// pipelineWithEvictionCredits pipelines preemptor onto a node whose eviction
+// credits (accumulated by reclaim or prior preempt iterations this cycle) cover
+// the task's full request. Allocatable is bypassed because the evictions are
+// already committed to the session.
+func (pmpt *Action) pipelineWithEvictionCredits(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	preemptor *api.TaskInfo,
+	candidateNodesByShard [2][]*api.NodeInfo,
+) bool {
+	if !preemptor.InitResreq.LessEqual(ssn.TotalEvictionCredits, api.Zero) {
+		return false
+	}
+
+	// Build a set of candidate node names for fast lookup.
+	candidateSet := make(map[string]struct{})
+	for _, nodes := range candidateNodesByShard {
+		for _, node := range nodes {
+			candidateSet[node.Name] = struct{}{}
+		}
+	}
+
+	for _, nodeName := range framework.CreditNodeNames(ssn.EvictionCreditsByNode) {
+		if _, ok := candidateSet[nodeName]; !ok {
+			continue
+		}
+		node, found := ssn.Nodes[nodeName]
+		if !found {
+			continue
+		}
+		if !framework.HasSufficientCredits(preemptor, nodeName, ssn.EvictionCreditsByNode, ssn.TotalEvictionCredits) {
+			continue
+		}
+		if !preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
+			continue
+		}
+		if err := ssn.PredicateForPreemptAction(preemptor, node); err != nil {
+			klog.V(5).Infof("Skip credit pipeline for Task <%s/%s> on Node <%s>: predicate failed: %v.",
+				preemptor.Namespace, preemptor.Name, nodeName, err)
+			continue
+		}
+
+		nodeStmt := framework.NewStatement(ssn)
+		if err := nodeStmt.Pipeline(preemptor, nodeName, true); err != nil {
+			klog.V(5).Infof("Credit pipeline failed for Task <%s/%s> on Node <%s>: %v.",
+				preemptor.Namespace, preemptor.Name, nodeName, err)
+			nodeStmt.Discard()
+			continue
+		}
+
+		framework.ConsumeCredits(preemptor, nodeName, ssn.EvictionCreditsByNode, ssn.TotalEvictionCredits)
+		stmt.Merge(nodeStmt)
+		klog.V(3).Infof("Pipelined Task <%s/%s> on Node <%s> using eviction credits.",
+			preemptor.Namespace, preemptor.Name, nodeName)
+		return true
+	}
+	return false
+}
+
 func (pmpt *Action) normalPreempt(
 	ssn *framework.Session,
 	stmt *framework.Statement,
 	preemptor *api.TaskInfo,
+	currentQueue *api.QueueInfo,
 	filter func(*api.TaskInfo) bool,
 	predicateNodes []*api.NodeInfo,
 ) (bool, error) {
 	nodeScores := util.PrioritizeNodes(preemptor, predicateNodes, ssn.BatchNodeOrderFn, ssn.NodeOrderMapFn, ssn.NodeOrderReduceFn)
 
 	selectedNodes := util.SortNodes(nodeScores)
-
-	job, found := ssn.Jobs[preemptor.Job]
-	if !found {
-		return false, fmt.Errorf("not found Job %s in Session", preemptor.Job)
-	}
-
-	currentQueue := ssn.Queues[job.Queue]
 
 	assigned := false
 
@@ -418,6 +554,21 @@ func (pmpt *Action) normalPreempt(
 
 			// Pipeline succeeded: merge this node's operations into the caller's statement.
 			stmt.Merge(nodeStmt)
+
+			// Record freed resources as session-level credits so subsequent
+			// preemptor tasks (and later actions) can use the credit fast path.
+			if evictionOccurred {
+				attemptByNode := make(map[string]*api.Resource)
+				attemptTotal := api.EmptyResource()
+				attemptEvictions := make(map[api.TaskID]struct{})
+				for _, victim := range victims {
+					framework.AccumulateCreditsFromVictim(victim, attemptByNode, attemptTotal, attemptEvictions, ssn.CreditedEvictions)
+				}
+				framework.MergeCredits(ssn.EvictionCreditsByNode, ssn.TotalEvictionCredits, ssn.CreditedEvictions, attemptByNode, attemptTotal, attemptEvictions)
+				klog.V(5).Infof("Accumulated preempt credits on Node <%s> for Task <%s/%s>: total <%v>.",
+					node.Name, preemptor.Namespace, preemptor.Name, ssn.TotalEvictionCredits)
+			}
+
 			assigned = true
 			break
 		}
