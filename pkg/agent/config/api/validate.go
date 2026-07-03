@@ -37,7 +37,7 @@ var (
 	IllegalOverSubscriptionTypes                                 = "overSubscriptionType(%s) is not supported, only supports cpu/memory"
 	IllegalCPUThrottlingThreshold                                = "cpuThrottlingThreshold must be a positive number between 1 and 100"
 	IllegalCPUJitterLimitPercent                                 = "cpuJitterLimitPercent must be a non-negative number between 1 and 100"
-	IllegalCPURecoverLimitPercent                                = "cpuRecoverLimitPercent must be a positive number between 1 and 100"
+	IllegalCPURecoverLimitPercent                                = "cpuRecoverLimitPercent must be a positive number"
 )
 
 type Validate interface {
