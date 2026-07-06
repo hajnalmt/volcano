@@ -74,6 +74,8 @@ metrics:                               # metrics server related configuration
     hostnameFieldName: "host.hostname" # Optional, The elasticsearch hostname field name, "host.hostname" by default
   ```
 
+If a usage plugin argument is configured with an invalid value, the plugin sets that argument to its default value.
+
 ### How to predicate node
 The plugins allow user to configure the cpu and memory average threshold within 5m.
 Any node whose usage is higher than the value of `CpuUsageAvg.5m` or `MemUsageAvg.5m` is filtered. If no threshold is configured, the node gets into priority stage.
@@ -88,6 +90,41 @@ Suppose there are two nodes with similar usage, The usage of one node fluctuates
 The third factor identified is the resource dimension. Take the below table as example. if there is pending pod which is a compute sensitive pod, it is more suitable to schedule it to `node2` with higher mem weight. DRF might be suitable to handle the case to calculate the cpu, mem, gpu share for pod and each node then make the best match.
 
 Finally, there should a model to balance multiple factors with weight and calculate the final score for nodes. Only the cpu usage factor will be considered in the alpha version.
+
+### Resource estimation for monitoring delay
+The usage plugin keeps a session-level shadow cache for pods that have been assigned to a node but whose metrics are not visible yet. The estimated resource of a Guaranteed or Burstable pod is:
+
+```
+pod_estimate = (request * request_ratio + (limit - request) * burst_ratio) * applied_risk_factor
+```
+
+The estimate is clamped to `[0, limit]`. If the pod has no limit for a resource, the request is used as the effective limit for that resource.
+
+`applied_risk_factor` is selected from the node composite load:
+
+```
+cpu_composite = (real_cpu_load + shadow_cpu_estimate) / node_cpu_capacity
+memory_composite = (real_memory_load + shadow_memory_estimate) / node_memory_capacity
+load_composite_percentage = weighted_average(cpu_composite, memory_composite, cpu.weight, memory.weight)
+```
+
+When `load_composite_percentage >= risk_threshold`, the estimate is multiplied by `risk_factor`; otherwise the multiplier is `1.0`.
+
+BestEffort pods do not use node-capacity ratios or density penalties. They use fixed configured estimates and are also affected by `risk_factor`:
+
+BestEffort estimates are configured under `estimator.be_cpu` and `estimator.be_mem`.
+
+Estimator configuration:
+
+```
+estimator:
+  request_ratio: 0.7   # 0 <= request_ratio <= 1
+  burst_ratio: 0       # 0 <= burst_ratio <= 1
+  risk_threshold: 0.6  # composite load threshold, 0.6 means 60%
+  risk_factor: 1.2     # applied after the threshold is reached, must be >= 1.0
+  be_cpu: 250m         # fixed BestEffort CPU estimate
+  be_mem: 200Mi        # fixed BestEffort memory estimate
+```
 
 | factors                   | node1           | node2            |
 | ----                      | ----            | ---              |
