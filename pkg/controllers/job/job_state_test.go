@@ -1353,7 +1353,7 @@ func TestRunningState_Execute(t *testing.T) {
 			} else if testcase.Action == busv1alpha1.AbortJobAction {
 				// always jump to aborting firstly
 				if jobInfo.Job.Status.State.Phase != v1alpha1.Aborting {
-					t.Errorf("Expected Job phase to %s, but got %s in case %d", v1alpha1.Restarting, jobInfo.Job.Status.State.Phase, i)
+					t.Errorf("Expected Job phase to %s, but got %s in case %d", v1alpha1.Aborting, jobInfo.Job.Status.State.Phase, i)
 				}
 			} else if testcase.Action == busv1alpha1.TerminateJobAction {
 				// always jump to terminating firstly
@@ -1363,7 +1363,7 @@ func TestRunningState_Execute(t *testing.T) {
 			} else if testcase.Action == busv1alpha1.CompleteJobAction {
 				// always jump to completing firstly
 				if jobInfo.Job.Status.State.Phase != v1alpha1.Completing {
-					t.Errorf("Expected Job phase to %s, but got %s in case %d", v1alpha1.Restarting, jobInfo.Job.Status.State.Phase, i)
+					t.Errorf("Expected Job phase to %s, but got %s in case %d", v1alpha1.Completing, jobInfo.Job.Status.State.Phase, i)
 				}
 			} else {
 				total := state.TotalTasks(testcase.JobInfo.Job)
