@@ -140,6 +140,29 @@ func TestColocationConfigValidate(t *testing.T) {
 			},
 			expectedErr: []error{errors.New(EvictingCPULowWatermarkHigherThanHighWatermark), errors.New(EvictingMemoryLowWatermarkHigherThanHighWatermark)},
 		},
+		{
+			// cpuRecoverLimitPercent is the maximum percent CPU quota increase allowed
+			// per interval, so a value greater than 100 (grow by more than 100%) is valid.
+			name: "legal CPUThrottlingConfig with cpuRecoverLimitPercent above 100",
+			colocationCfg: &ColocationConfig{
+				CPUThrottlingConfig: &CPUThrottling{
+					Enable:                 utilpointer.Bool(true),
+					CPUThrottlingThreshold: utilpointer.Int(80),
+					CPUJitterLimitPercent:  utilpointer.Int(10),
+					CPURecoverLimitPercent: utilpointer.Int(150),
+				},
+			},
+		},
+		{
+			name: "illegal CPUThrottlingConfig && non-positive cpuRecoverLimitPercent",
+			colocationCfg: &ColocationConfig{
+				CPUThrottlingConfig: &CPUThrottling{
+					Enable:                 utilpointer.Bool(true),
+					CPURecoverLimitPercent: utilpointer.Int(0),
+				},
+			},
+			expectedErr: []error{errors.New(IllegalCPURecoverLimitPercent)},
+		},
 	}
 
 	for _, tc := range testCases {
