@@ -92,7 +92,7 @@ node-3            4h8m
 
 ### Running volcano Job with topology policy
 
-Support the task-level topology policy and edit **spec.tasks.topologyPolicy** to specify whether to perform topology scheduling.<br> The supported options are the same as [topology manager](https://v1-19.docs.kubernetes.io/docs/tasks/administer-cluster/topology-manager/) on kubelet:
+Support the task-level topology policy and edit **spec.tasks.topologyPolicy** to specify whether to perform topology scheduling.<br> The supported options are the same as [topology manager](https://kubernetes.io/docs/tasks/administer-cluster/topology-manager/#topology-manager-policies) on kubelet:
 
 ````
    1. single-numa-node
