@@ -33,11 +33,11 @@ type Options struct {
 // AddFlags is responsible for add flags from the given FlagSet instance for current GenericOptions.
 func (o *Options) AddFlags(c *cobra.Command) {
 	c.Flags().StringVar(&o.CheckoutInterval, utils.NetWorkQoSCheckInterval, o.CheckoutInterval, "check interval is the interval of checking and updating the offline jobs bandwidth limit")
-	c.Flags().StringVar(&o.OnlineBandwidthWatermark, utils.OnlineBandwidthWatermarkKey, o.OnlineBandwidthWatermark, "online-bandwidth-watermark is is the bandwidth threshold of online jobs, "+
-		"is the sum of bandwidth of all online pods")
-	c.Flags().StringVar(&o.OfflineLowBandwidth, utils.OfflineLowBandwidthKey, o.OfflineLowBandwidth, "offline-low-bandwidth is the maximum amount of network bandwidth that can be used by offline jobs when the"+
-		"bandwidth usage of online jobs exceeds the defined threshold(online-bandwidth-watermark)")
-	c.Flags().StringVar(&o.OfflineHighBandwidth, utils.OfflineHighBandwidthKey, o.OfflineHighBandwidth, "offline-high-bandwidth is the maximum amount of network bandwidth that can be used by offline jobs when the"+
-		"bandwidth usage of online jobs not reach to the defined threshold(online-bandwidth-watermark)")
+	c.Flags().StringVar(&o.OnlineBandwidthWatermark, utils.OnlineBandwidthWatermarkKey, o.OnlineBandwidthWatermark, "online-bandwidth-watermark is the bandwidth threshold of online jobs, "+
+		"which is the sum of the bandwidth of all online pods")
+	c.Flags().StringVar(&o.OfflineLowBandwidth, utils.OfflineLowBandwidthKey, o.OfflineLowBandwidth, "offline-low-bandwidth is the maximum amount of network bandwidth that can be used by offline jobs when the "+
+		"bandwidth usage of online jobs exceeds the defined threshold (online-bandwidth-watermark)")
+	c.Flags().StringVar(&o.OfflineHighBandwidth, utils.OfflineHighBandwidthKey, o.OfflineHighBandwidth, "offline-high-bandwidth is the maximum amount of network bandwidth that can be used by offline jobs when the "+
+		"bandwidth usage of online jobs does not reach the defined threshold (online-bandwidth-watermark)")
 	c.Flags().BoolVar(&o.EnableNetworkQoS, utils.EnableNetworkQoS, o.EnableNetworkQoS, "enable networkqos")
 }
