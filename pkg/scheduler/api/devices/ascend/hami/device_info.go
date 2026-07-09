@@ -40,6 +40,7 @@ const (
 	DeviceBindAllocating = "allocating"
 	DeviceBindFailed     = "failed"
 	DeviceBindSuccess    = "success"
+	NodeLockAscend       = "hami.io/mutex.lock"
 
 	Ascend910Prefix        = "Ascend910"
 	Ascend910NetworkWeight = 10
@@ -318,9 +319,9 @@ func (ads *AscendDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod)
 	klog.V(4).Infof("Allocate device %s to Pod %s", ads.Type, pod.Name)
 	if NodeLockEnable {
 		nodelock.UseClient(kubeClient)
-		err := nodelock.LockNode(ads.NodeName, ads.Type)
+		err := nodelock.LockNode(ads.NodeName, NodeLockAscend)
 		if err != nil {
-			return errors.Errorf("node %s locked for %s hami vnpu. lockname %s", ads.NodeName, pod.Name, err.Error())
+			return errors.Errorf("node %s locked for %s. err: %s", ads.NodeName, pod.Name, err.Error())
 		}
 	}
 	podDevs, err := ads.selectDevices(pod, ads.Policy)
@@ -338,9 +339,6 @@ func (ads *AscendDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod)
 	err = devices.PatchPodAnnotations(kubeClient, pod, annotations)
 	if err != nil {
 		return err
-	}
-	if NodeLockEnable {
-		nodelock.ReleaseNodeLock(ads.NodeName, ads.Type)
 	}
 	klog.V(4).Infof("Allocate Success. device %s Pod %s", ads.Type, pod.Name)
 	return nil

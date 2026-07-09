@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"volcano.sh/volcano/pkg/scheduler/api/devices"
 	"volcano.sh/volcano/pkg/scheduler/api/devices/config"
@@ -722,6 +723,44 @@ func TestAscendDevices_AddResource(t *testing.T) {
 	}
 }
 
+func TestAllocateAddsNodeLockAscendWhenEnabled(t *testing.T) {
+	prev := NodeLockEnable
+	NodeLockEnable = true
+	defer func() {
+		NodeLockEnable = prev
+	}()
+	cleanupKeys := setupReleaseTestKeys()
+	defer cleanupKeys()
+
+	nodeName := "test-node-lock-enabled"
+	pod := createTestPod("allocate-node-lock", "default", map[string]string{})
+	client := fake.NewSimpleClientset(&v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        nodeName,
+			Annotations: map[string]string{},
+		},
+	}, pod.DeepCopy())
+
+	ads := &AscendDevices{
+		NodeName: nodeName,
+		Type:     "Ascend910A",
+		Devices: map[string]*AscendDevice{
+			"device-1": createTestAscendAllocateDevice("device-1"),
+		},
+	}
+	err := ads.Allocate(client, pod)
+	assert.NoError(t, err)
+
+	gotNode, getErr := client.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
+	assert.NoError(t, getErr)
+
+	lockValue, ok := gotNode.Annotations[NodeLockAscend]
+	assert.True(t, ok, "expected node annotation %q to be set", NodeLockAscend)
+	assert.NotEmpty(t, lockValue)
+	_, parseErr := time.Parse(time.RFC3339, lockValue)
+	assert.NoError(t, parseErr, "lock annotation should be an RFC3339 timestamp")
+}
+
 func createTestAscendDevices(nodeName, deviceType string, devices map[string]*AscendDevice) *AscendDevices {
 	return &AscendDevices{
 		NodeName: nodeName,
@@ -764,6 +803,30 @@ func createTestAscendDevice(id string, totalCores, totalMem int32, used, usedmem
 	}
 
 	return device
+}
+
+func createTestAscendAllocateDevice(id string) *AscendDevice {
+	return &AscendDevice{
+		DeviceInfo: &devices.DeviceInfo{
+			ID:      id,
+			Devcore: 30,
+			Devmem:  32768,
+			Count:   1,
+		},
+		DeviceUsage: &devices.DeviceUsage{
+			Used:      0,
+			Usedmem:   0,
+			Usedcores: 0,
+		},
+		PodMap: make(map[string]*devices.DeviceUsage),
+		config: config.VNPUConfig{
+			CommonWord:         "Ascend910A",
+			ResourceName:       "huawei.com/Ascend910A",
+			ResourceMemoryName: "huawei.com/Ascend910A-memory",
+			MemoryCapacity:     32768,
+			MemoryAllocatable:  32768,
+		},
+	}
 }
 
 func createTestPod(name, namespace string, annotations map[string]string) *v1.Pod {
