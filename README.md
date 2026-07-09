@@ -226,8 +226,14 @@ Resources:
 
 If you have any question, feel free to reach out to us in the following ways:
 
-[Volcano Slack Channel](https://cloud-native.slack.com/archives/C011GJDQS0N) | [Join](https://slack.cncf.io/)
+> [!TIP]
+> New to the Volcano community? First, join the CNCF Slack workspace using the **Join CNCF Slack** link below. After signing in, search for the `#volcano` channel in the CNCF Slack workspace and join it to participate in community discussions.
 
-[Mailing List](https://groups.google.com/forum/#!forum/volcano-sh)
+**CNCF Slack Workspace Signup:** [Domain Signup](https://cloud-native.slack.com/signup#/domain-signup) or [Community Inviter](https://communityinviter.com/apps/cloud-native/cncf)
 
-WeChat: Please add WeChat account `k8s2222` and request an invitation to the group chat.
+**Volcano Slack Channel:** [#volcano](https://cloud-native.slack.com/archives/C011GJDQS0N)
+
+**Mailing List:** [volcano-sh Google Group](https://groups.google.com/forum/#!forum/volcano-sh)
+
+**WeChat:** Please add WeChat account `k8s2222` and request an invitation to the group chat.
+
