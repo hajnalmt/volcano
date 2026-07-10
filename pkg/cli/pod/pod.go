@@ -280,7 +280,9 @@ func appendIfNotExists(existing, toAppend []corev1.Pod) []corev1.Pod {
 	for _, pod := range toAppend {
 		exists := false
 		for _, existingPod := range existing {
-			if existingPod.Name == pod.Name {
+			// A pod is identified by namespace and name; two pods with the same
+			// name in different namespaces are distinct, so only skip a real duplicate.
+			if existingPod.Namespace == pod.Namespace && existingPod.Name == pod.Name {
 				exists = true
 				break
 			}
