@@ -263,6 +263,7 @@ clean:
 verify:
 	hack/verify-gofmt.sh
 	hack/verify-gencode.sh
+	hack/verify-gomod.sh
 
 lint: ## Lint the files
 	hack/verify-golangci-lint.sh
