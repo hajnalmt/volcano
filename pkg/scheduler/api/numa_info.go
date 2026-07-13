@@ -195,12 +195,19 @@ type PodMeta struct {
 // map key by encoding/json, which requires map key types to be strings,
 // integer types, or implement encoding.TextMarshaler.
 func (p PodMeta) MarshalText() ([]byte, error) {
-	return json.Marshal(p)
+	type plain PodMeta
+	return json.Marshal(plain(p))
 }
 
 // UnmarshalText reverses MarshalText.
 func (p *PodMeta) UnmarshalText(data []byte) error {
-	return json.Unmarshal(data, p)
+	type plain PodMeta
+	var tmp plain
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+	*p = PodMeta(tmp)
+	return nil
 }
 
 // CheckNumaPodAssigned returns true if the specified pod has been assigned numa resources, returns false otherwise.
