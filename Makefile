@@ -253,12 +253,6 @@ generate-yaml: init manifests
 generate-charts: init manifests
 	./hack/generate-charts.sh
 
-release-env:
-	./hack/build-env.sh release
-
-dev-env:
-	./hack/build-env.sh dev
-
 release: images generate-yaml
 	./hack/publish.sh
 
@@ -269,8 +263,6 @@ clean:
 verify:
 	hack/verify-gofmt.sh
 	hack/verify-gencode.sh
-    # this verify is deprecated and use make lint-licenses instead.
-	#hack/verify-vendor-licenses.sh
 
 lint: ## Lint the files
 	hack/verify-golangci-lint.sh
