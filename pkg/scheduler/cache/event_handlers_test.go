@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/cpuset"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
 	schedulingv1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -1571,5 +1572,146 @@ func TestSchedulerCache_SyncHyperNode(t *testing.T) {
 			assert.Equal(t, tt.expectedHyperNodesInfo, actualHyperNodes)
 			assert.Equal(t, tt.ready, sc.HyperNodesInfo.Ready())
 		})
+	}
+}
+
+// --- helpers shared with cache_test.go numa tests ---
+
+func newCacheWithNodes(names ...string) *SchedulerCache {
+	sc := &SchedulerCache{
+		Nodes: make(map[string]*schedulingapi.NodeInfo),
+		Jobs:  make(map[schedulingapi.JobID]*schedulingapi.JobInfo),
+	}
+	for _, n := range names {
+		sc.Nodes[n] = schedulingapi.NewNodeInfo(buildNode(n, nil))
+	}
+	return sc
+}
+
+func resSets(cpuSet string) schedulingapi.ResNumaSets {
+	return schedulingapi.ResNumaSets{"cpu": mustParseCPUSet(cpuSet)}
+}
+
+func mustParseCPUSet(s string) cpuset.CPUSet {
+	c, err := cpuset.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+// podMetaFrom returns the PodMeta matching buildPod's UID convention so we look
+// up the same key that clearUnassignedNumaTask derives from the pod.
+func podMetaFrom(pod *v1.Pod) schedulingapi.PodMeta {
+	return schedulingapi.PodMeta{UID: pod.UID, Name: pod.Name, Namespace: pod.Namespace}
+}
+
+func TestClearUnassignedNumaTask_RemovesEntry(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	node := sc.Nodes["n1"]
+
+	pod := buildPod("ns1", "p1", "n1", v1.PodRunning, nil, nil, nil)
+	node.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+		podMetaFrom(pod): resSets("0-1"),
+	}
+	task := schedulingapi.NewTaskInfo(pod)
+
+	sc.clearUnassignedNumaTask(task)
+
+	if len(node.UnassignedNumaPods) != 0 {
+		t.Errorf("expected entry to be cleared, got %v", node.UnassignedNumaPods)
+	}
+}
+
+func TestClearUnassignedNumaTask_NoOpWhenTaskHasNoNode(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	node := sc.Nodes["n1"]
+
+	pod := buildPod("ns1", "p1", "", v1.PodRunning, nil, nil, nil)
+	node.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+		podMetaFrom(pod): resSets("0-1"),
+	}
+	task := schedulingapi.NewTaskInfo(pod)
+
+	sc.clearUnassignedNumaTask(task)
+
+	if len(node.UnassignedNumaPods) != 1 {
+		t.Errorf("expected entry to remain when task has no node, got %v", node.UnassignedNumaPods)
+	}
+}
+
+func TestClearUnassignedNumaTask_NoOpWhenEntryMissing(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	node := sc.Nodes["n1"]
+	otherPod := buildPod("ns1", "pother", "n1", v1.PodRunning, nil, nil, nil)
+	node.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+		podMetaFrom(otherPod): resSets("0-1"),
+	}
+
+	pod := buildPod("ns1", "p1", "n1", v1.PodRunning, nil, nil, nil)
+	task := schedulingapi.NewTaskInfo(pod)
+
+	sc.clearUnassignedNumaTask(task)
+
+	if len(node.UnassignedNumaPods) != 1 {
+		t.Errorf("expected unrelated entry to remain, got %v", node.UnassignedNumaPods)
+	}
+}
+
+func TestClearUnassignedNumaTask_NoOpWhenNodeMissing(t *testing.T) {
+	sc := newCacheWithNodes()
+	pod := buildPod("ns1", "p1", "ghost", v1.PodRunning, nil, nil, nil)
+	task := schedulingapi.NewTaskInfo(pod)
+
+	// Must not panic.
+	sc.clearUnassignedNumaTask(task)
+}
+
+func TestClearUnassignedNumaPod_FallsBackToPodInfoWhenTaskNotInJob(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	node := sc.Nodes["n1"]
+
+	pod := buildPod("ns1", "p1", "n1", v1.PodRunning, nil, nil, nil)
+	node.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+		podMetaFrom(pod): resSets("0-1"),
+	}
+	// No job registered in sc.Jobs, so clearUnassignedNumaPod falls back to the
+	// TaskInfo built directly from the pod.
+	sc.clearUnassignedNumaPod(pod)
+
+	if len(node.UnassignedNumaPods) != 0 {
+		t.Errorf("expected entry cleared via fallback path, got %v", node.UnassignedNumaPods)
+	}
+}
+
+func TestClearUnassignedNumaPod_UsesTaskFromJobWhenPresent(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	nodeN1 := sc.Nodes["n1"]
+
+	sc.Nodes["n2"] = schedulingapi.NewNodeInfo(buildNode("n2", nil))
+	nodeN2 := sc.Nodes["n2"]
+
+	pod := buildPod("ns1", "p1", "n1", v1.PodRunning, nil, nil, nil)
+	podMeta := podMetaFrom(pod)
+	nodeN1.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{podMeta: resSets("0-1")}
+	nodeN2.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{podMeta: resSets("2-3")}
+
+	fallbackTask := schedulingapi.NewTaskInfo(pod)
+	// Register a job whose task points at n2 (different from the pod's nn=n1 so
+	// the fallback TaskInfo would clear the wrong node). clearUnassignedNumaPod
+	// must prefer the job's task.
+	standalone := schedulingapi.NewTaskInfo(pod)
+	jobTask := *standalone
+	jobTask.NodeName = "n2"
+	job := &schedulingapi.JobInfo{Tasks: map[schedulingapi.TaskID]*schedulingapi.TaskInfo{fallbackTask.UID: &jobTask}}
+	sc.Jobs[fallbackTask.Job] = job
+
+	sc.clearUnassignedNumaPod(pod)
+
+	if len(nodeN1.UnassignedNumaPods) != 1 {
+		t.Errorf("n1 entry should remain since job task points to n2, got %v", nodeN1.UnassignedNumaPods)
+	}
+	if len(nodeN2.UnassignedNumaPods) != 0 {
+		t.Errorf("n2 entry should have been cleared, got %v", nodeN2.UnassignedNumaPods)
 	}
 }

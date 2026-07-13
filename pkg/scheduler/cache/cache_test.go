@@ -685,3 +685,117 @@ func TestWaitForHandlerSync_InitialEventAsyncHandlerTracker_CompletesAfterDone(t
 	assert.Less(t, elapsed, 2*time.Second, "WaitForHandlerSync should return after all pending objects are processed")
 	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "WaitForHandlerSync should wait until Done is called")
 }
+
+func TestAddUnassignedNumaPods_NodeMissingSkipsWithoutCrash(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+
+	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {
+			"ghost-node": resSets("0-1"),
+			"n1":         resSets("0-1"),
+		},
+	}
+
+	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
+		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
+	}
+
+	n1 := sc.Nodes["n1"]
+	if len(n1.UnassignedNumaPods) != 1 {
+		t.Fatalf("expected exactly one entry on n1, got %v", n1.UnassignedNumaPods)
+	}
+	got, ok := n1.UnassignedNumaPods[api.PodMeta{UID: "uid-1", Name: "p1", Namespace: "ns1"}]
+	if !ok {
+		t.Fatalf("expected entry for p1 on n1")
+	}
+	if !got["cpu"].Equals(mustParseCPUSet("0-1")) {
+		t.Errorf("CPUSet on n1 mismatch: got %v", got["cpu"])
+	}
+}
+
+func TestAddUnassignedNumaPods_LazilyInitializesMap(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	if sc.Nodes["n1"].UnassignedNumaPods != nil {
+		t.Fatalf("precondition: UnassignedNumaPods should start nil")
+	}
+
+	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("0-1")},
+	}
+
+	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
+		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
+	}
+
+	if sc.Nodes["n1"].UnassignedNumaPods == nil {
+		t.Fatalf("expected UnassignedNumaPods to be initialized")
+	}
+}
+
+func TestAddUnassignedNumaPods_MultiplePodsAccumulateOnSameNode(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+
+	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("0-1")},
+		{UID: "uid-2", Name: "p2", Namespace: "ns1"}: {"n1": resSets("2-3")},
+	}
+
+	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
+		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
+	}
+
+	unassigned := sc.Nodes["n1"].UnassignedNumaPods
+	if len(unassigned) != 2 {
+		t.Fatalf("expected 2 unassigned pods on n1, got %d", len(unassigned))
+	}
+	for _, pm := range []api.PodMeta{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"},
+		{UID: "uid-2", Name: "p2", Namespace: "ns1"},
+	} {
+		if _, ok := unassigned[pm]; !ok {
+			t.Errorf("missing entry for %v on n1", pm)
+		}
+	}
+}
+
+func TestAddUnassignedNumaPods_RewritesExistingEntryOnResend(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+
+	first := map[api.PodMeta]map[string]api.ResNumaSets{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("0-1")},
+	}
+	if err := sc.AddUnassignedNumaPods(first); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	// Same pod resubmitted with a different decision — must overwrite, not merge.
+	second := map[api.PodMeta]map[string]api.ResNumaSets{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("4-5")},
+	}
+	if err := sc.AddUnassignedNumaPods(second); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+
+	if len(sc.Nodes["n1"].UnassignedNumaPods) != 1 {
+		t.Fatalf("expected 1 entry after resend, got %v", sc.Nodes["n1"].UnassignedNumaPods)
+	}
+	got := sc.Nodes["n1"].UnassignedNumaPods[api.PodMeta{UID: "uid-1", Name: "p1", Namespace: "ns1"}]["cpu"]
+	if !got.Equals(mustParseCPUSet("4-5")) {
+		t.Errorf("expected overwrite to 4-5, got %v", got)
+	}
+}
+
+func TestAddUnassignedNumaPods_NilNodeValueSkips(t *testing.T) {
+	// Edge case: explicitly stored nil node should be skipped, mirroring the guard.
+	sc := newCacheWithNodes()
+	sc.Nodes["nil-node"] = nil
+
+	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
+		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"nil-node": resSets("0-1")},
+	}
+
+	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
+		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
+	}
+	// No panic is the success condition.
+}
