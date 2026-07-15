@@ -224,3 +224,27 @@ func buildPod(namespace, name string, labels map[string]string, annotations map[
 		},
 	}
 }
+
+func TestAppendIfNotExists(t *testing.T) {
+	// A pod is identified by namespace and name. Two pods that share a name but
+	// live in different namespaces are distinct, so both must survive the merge;
+	// only a genuine duplicate (same namespace and name) should be dropped.
+	existing := []corev1.Pod{
+		buildPod("team-a", "worker-0", nil, nil),
+	}
+	toAppend := []corev1.Pod{
+		buildPod("team-a", "worker-0", nil, nil), // genuine duplicate, should be skipped
+		buildPod("team-b", "worker-0", nil, nil), // same name, other namespace, should be kept
+	}
+
+	got := appendIfNotExists(existing, toAppend)
+
+	var keys []string
+	for _, p := range got {
+		keys = append(keys, p.Namespace+"/"+p.Name)
+	}
+	want := []string{"team-a/worker-0", "team-b/worker-0"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("expected pods %v, got %v", want, keys)
+	}
+}
