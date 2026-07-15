@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -153,6 +154,7 @@ func ListPods(ctx context.Context) error {
 		fmt.Printf("No resources found\n")
 		return nil
 	}
+	sortPods(pods.Items)
 	PrintPods(&pods, os.Stdout, listPodFlags.allNamespace)
 
 	return nil
@@ -311,6 +313,18 @@ func appendIfNotExists(existing, toAppend []corev1.Pod) []corev1.Pod {
 		}
 	}
 	return existing
+}
+
+// sortPods orders the pods by namespace and name. The queue path merges two
+// filtered lists, so without this the rows can come out with the namespaces
+// interleaved rather than grouped.
+func sortPods(pods []corev1.Pod) {
+	sort.Slice(pods, func(i, j int) bool {
+		if pods[i].Namespace != pods[j].Namespace {
+			return pods[i].Namespace < pods[j].Namespace
+		}
+		return pods[i].Name < pods[j].Name
+	})
 }
 
 // translateTimestampSince translates a timestamp into a human-readable string using time.Since.

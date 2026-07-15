@@ -295,6 +295,28 @@ func TestPrintPodsHeaderDrivenWidth(t *testing.T) {
 	}
 }
 
+func TestSortPods(t *testing.T) {
+	// Rows can turn up with the namespaces interleaved, so check they come back
+	// grouped by namespace, and by name within each one.
+	pods := []corev1.Pod{
+		buildPod("team-b", "worker-1", nil, nil),
+		buildPod("team-a", "worker-1", nil, nil),
+		buildPod("team-b", "worker-0", nil, nil),
+		buildPod("team-a", "worker-0", nil, nil),
+	}
+
+	sortPods(pods)
+
+	var got []string
+	for _, p := range pods {
+		got = append(got, p.Namespace+"/"+p.Name)
+	}
+	want := []string{"team-a/worker-0", "team-a/worker-1", "team-b/worker-0", "team-b/worker-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("expected pods in order %v, got %v", want, got)
+	}
+}
+
 func TestAppendIfNotExists(t *testing.T) {
 	existing := []corev1.Pod{
 		buildPod("team-a", "worker-0", nil, nil),
