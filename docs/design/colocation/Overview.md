@@ -239,7 +239,7 @@ online-demo-9f9bbdb58-fljzs   1/1     Running   0          6s
 
 #### Eviction happens when node has pressure
 
-Online workloads Qos is guaranteed by volcano agent and host OS, volcano agent detects node resource utilization in real time, and will evict offline workloads when node resource utilization exceeds the threshold, for CPU resource, it's 80% by default, we perform 7 core cpu stress to online workload, we can check event and it showed that offline workload is evicted after about 1 minutes later.
+Online workloads Qos is guaranteed by volcano agent and host OS, volcano agent detects node resource utilization in real time, and will evict offline workloads when node resource utilization exceeds the threshold, for CPU resource, it's 80% by default, we perform 7 core cpu stress to online workload, we can check event and it showed that offline workload is evicted after about 1 minute later.
 
 ```shell
 $ kubectl get event | grep Evicted
@@ -382,7 +382,7 @@ You can see that offline pod can use almost 10% bandwidth when online pod use mo
 
 ### Feature switch
 
-Colocation feature has a unified switch on node, node has label volcano.sh/oversubscription=true or volcano.sh/colocation=true indicates that coloation is enabled. You can remove the two labels to disable all colocation features. And all colocation features take effect when node has these labels.
+Colocation feature has a unified switch on node. A node with the label volcano.sh/oversubscription=true or volcano.sh/colocation=true indicates that colocation is enabled. You can remove the two labels to disable all colocation features. All colocation features take effect when node has these labels.
 
 - If you only want to use online and offline workloads colocation but not resource oversubscription, you just need to set the node label volcano.sh/colocation="true".
 - If you want to use colocation and resource oversubscription, you should set node label volcano.sh/oversubscription=true.

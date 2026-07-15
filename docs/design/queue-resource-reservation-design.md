@@ -110,7 +110,7 @@ the more idle resources on the nodes,the priority is higher. and the weight is 0
 * idle  :  the sum idle of resources on the nodes.
 
 * We hope the value of (sum-target) is as less as possible to avoid wasting of the cluster resources. and this should have the highest weight.
-* We consider the element 'used' will effect the locking nodes's efficiency and stable.
+* We consider that the 'used' element will affect the efficiency and stability of the locked nodes.
 * When the above two conditions's score are almost close. we prefer the The least number of combination nodes as the best choice, because the fewer nodes
 locked, the smaller the impact on the cluster.
 * The least important condition is the idle of the nodes,the more idle the nodes are, the more efficient it is to lock on.

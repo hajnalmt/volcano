@@ -38,7 +38,7 @@ Based on the scenarios listed above, the dependencies can be abstracted as:
 * Task-A depends on task-B, which means A must be started first and then B.
 * Triggering policy, in our cases, there may be only one trigger policy, which is the running state
 
-For the ease of end user's experience, we need to unify the way of composing a complicated jobs with lots of tasks, instead of letting user handle the complexity themselves using init-containers or other workflow tools. So we need to  have an more advanced VCJob that has below abilities:
+To improve the end-user experience, we need to unify the way of composing complex jobs with many tasks, instead of letting user handle the complexity themselves using init-containers or other workflow tools. So we need to have a more advanced VCJob that has below abilities:
 
 ## Design
 
