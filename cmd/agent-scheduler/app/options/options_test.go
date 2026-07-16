@@ -125,7 +125,7 @@ func TestCheckOptionOrDieSyncsAgentShardingOptions(t *testing.T) {
 	assert.Equal(t, defaultShardName, s.ServerOption.ShardName)
 }
 
-func TestCheckOptionOrDieRejectsZeroScheduleWorkerCount(t *testing.T) {
+func TestCheckOptionOrDieRejectsNonPositiveScheduleWorkerCount(t *testing.T) {
 	fs := pflag.NewFlagSet("worker-count-test", pflag.ExitOnError)
 	s := NewServerOption()
 	commonutil.LeaderElectionDefault(&s.LeaderElection)
