@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -312,7 +313,7 @@ func TestSortPods(t *testing.T) {
 		got = append(got, p.Namespace+"/"+p.Name)
 	}
 	want := []string{"team-a/worker-0", "team-a/worker-1", "team-b/worker-0", "team-b/worker-1"}
-	if !reflect.DeepEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("expected pods in order %v, got %v", want, got)
 	}
 }
