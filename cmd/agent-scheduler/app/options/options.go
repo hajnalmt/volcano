@@ -128,6 +128,9 @@ func (s *ServerOption) AddFlags(fs *pflag.FlagSet) {
 func (s *ServerOption) CheckOptionOrDie() error {
 	s.ServerOption.ShardingMode = s.ShardingMode
 	s.ServerOption.ShardName = s.ShardName
+	if s.ScheduleWorkerCount == 0 {
+		return fmt.Errorf("scheduler-worker-count must be greater than 0")
+	}
 	return componentbaseconfigvalidation.ValidateLeaderElectionConfiguration(&s.LeaderElection, field.NewPath("leaderElection")).ToAggregate()
 }
 
