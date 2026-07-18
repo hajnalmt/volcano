@@ -311,6 +311,13 @@ func (pmpt *Action) preempt(
 	predicateNodes, _ := predicateHelper.PredicateNodes(preemptor, allNodes, ssn.PredicateForPreemptAction, pmpt.enablePredicateErrorCache, ssn.NodesInShard)
 
 	candidateNodes := util.GetPredicatedNodeByShard(predicateNodes, ssn.NodesInShard)
+
+	// Fast path: eviction credits paid by a prior action or job this cycle already
+	// cover the request, so pipeline without evicting a new victim.
+	if pmpt.pipelineWithEvictionCredits(ssn, stmt, preemptor, candidateNodes) {
+		return true, nil
+	}
+
 	var preemptSuccess bool
 	var err error
 	//try to preempt in order if multiple candidate Nodes group with priority exist
@@ -418,6 +425,19 @@ func (pmpt *Action) normalPreempt(
 
 			// Pipeline succeeded: merge this node's operations into the caller's statement.
 			stmt.Merge(nodeStmt)
+
+			// Record freed resources (including group-eviction cascade siblings on
+			// other nodes) as session credits for later tasks and actions.
+			if evictionOccurred {
+				attemptByNode := make(map[string]*api.Resource)
+				attemptTotal := api.EmptyResource()
+				attemptEvictions := make(map[api.TaskID]struct{})
+				for _, victim := range victims {
+					framework.AccumulateCreditsFromVictim(ssn, victim, attemptByNode, attemptTotal, attemptEvictions, ssn.CreditedEvictions)
+				}
+				framework.MergeCredits(ssn.EvictionCreditsByNode, ssn.TotalEvictionCredits, ssn.CreditedEvictions, attemptByNode, attemptTotal, attemptEvictions)
+			}
+
 			assigned = true
 			break
 		}
@@ -427,6 +447,64 @@ func (pmpt *Action) normalPreempt(
 	}
 
 	return assigned, nil
+}
+
+// pipelineWithEvictionCredits pipelines the preemptor onto a node whose eviction
+// credits (accumulated by reclaim or a prior preempt this cycle) cover the full
+// request. Allocatable is bypassed because the evictions are already committed;
+// correctness is preserved by the per-node credit and FutureIdle gates.
+func (pmpt *Action) pipelineWithEvictionCredits(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	preemptor *api.TaskInfo,
+	candidateNodesByShard [2][]*api.NodeInfo,
+) bool {
+	if !preemptor.InitResreq.LessEqual(ssn.TotalEvictionCredits, api.Zero) {
+		return false
+	}
+
+	candidateSet := make(map[string]struct{})
+	for _, nodes := range candidateNodesByShard {
+		for _, node := range nodes {
+			candidateSet[node.Name] = struct{}{}
+		}
+	}
+
+	for _, nodeName := range framework.CreditNodeNames(ssn.EvictionCreditsByNode) {
+		if _, ok := candidateSet[nodeName]; !ok {
+			continue
+		}
+		node, found := ssn.Nodes[nodeName]
+		if !found {
+			continue
+		}
+		if !framework.HasSufficientCredits(preemptor, nodeName, ssn.EvictionCreditsByNode, ssn.TotalEvictionCredits) {
+			continue
+		}
+		if !preemptor.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
+			continue
+		}
+		if err := ssn.PredicateForPreemptAction(preemptor, node); err != nil {
+			klog.V(5).Infof("Skip credit pipeline for Task <%s/%s> on Node <%s>: predicate failed: %v.",
+				preemptor.Namespace, preemptor.Name, nodeName, err)
+			continue
+		}
+
+		nodeStmt := framework.NewStatement(ssn)
+		if err := nodeStmt.Pipeline(preemptor, nodeName, true); err != nil {
+			klog.V(5).Infof("Credit pipeline failed for Task <%s/%s> on Node <%s>: %v.",
+				preemptor.Namespace, preemptor.Name, nodeName, err)
+			nodeStmt.Discard()
+			continue
+		}
+
+		framework.ConsumeCredits(preemptor, nodeName, ssn.EvictionCreditsByNode, ssn.TotalEvictionCredits)
+		stmt.Merge(nodeStmt)
+		klog.V(3).Infof("Pipelined Task <%s/%s> on Node <%s> using eviction credits.",
+			preemptor.Namespace, preemptor.Name, nodeName)
+		return true
+	}
+	return false
 }
 
 func (pmpt *Action) taskEligibleToPreempt(preemptor *api.TaskInfo) error {

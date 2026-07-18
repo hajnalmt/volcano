@@ -26,10 +26,12 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
+	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/util"
+	commonutil "volcano.sh/volcano/pkg/util"
 )
 
 type Action struct {
@@ -122,6 +124,9 @@ func (ra *Action) Execute(ssn *framework.Session) {
 			}
 			job := jobsQ.Pop().(*api.JobInfo)
 			stmt := framework.NewStatement(ssn)
+			jobReclaimedByNode := framework.CloneCreditsByNode(ssn.EvictionCreditsByNode)
+			jobTotalReclaimed := ssn.TotalEvictionCredits.Clone()
+			jobCreditedVictims := framework.CloneCreditedSet(ssn.CreditedEvictions)
 
 			for {
 				// If job is not request more resource, then stop reclaiming.
@@ -160,11 +165,14 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				ra.reclaimForTask(ssn, stmt, task, job)
+				ra.reclaimForTask(ssn, stmt, task, job, jobReclaimedByNode, jobTotalReclaimed, jobCreditedVictims, ssn.CreditedEvictions)
 			}
 
 			if ssn.JobPipelined(job) {
 				stmt.Commit()
+				ssn.EvictionCreditsByNode = jobReclaimedByNode
+				ssn.TotalEvictionCredits = jobTotalReclaimed
+				ssn.CreditedEvictions = jobCreditedVictims
 			} else {
 				stmt.Discard()
 			}
@@ -244,7 +252,20 @@ func (ra *Action) pipelineWithIdleResources(
 	return true
 }
 
-func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, job *api.JobInfo) {
+func (ra *Action) reclaimForTask(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	task *api.TaskInfo,
+	job *api.JobInfo,
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+	creditedVictims map[api.TaskID]struct{},
+	committedEvictions map[api.TaskID]struct{},
+) {
+	if ra.pipelineWithReclaimCredits(ssn, stmt, task, reclaimedByNode, totalReclaimed) {
+		return
+	}
+
 	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
 	predicateHelper := util.NewPredicateHelper()
 	predicateNodes, _ := predicateHelper.PredicateNodes(task, totalNodes, ssn.PredicateForPreemptAction, ra.enablePredicateErrorCache, ssn.NodesInShard)
@@ -325,6 +346,9 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		evictionFailed := false
 		evictionOccurred := false
 		taskCanBePipelined := false
+		attemptReclaimedByNode := make(map[string]*api.Resource)
+		attemptTotalReclaimed := api.EmptyResource()
+		attemptCreditedVictims := make(map[api.TaskID]struct{})
 
 		for !nodeVictimsQueue.Empty() {
 			victim := nodeVictimsQueue.Pop().(*api.TaskInfo)
@@ -341,6 +365,7 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 			reclaimed.Add(victim.Resreq)
 			availableResources.Add(victim.Resreq)
 			evictionOccurred = true
+			framework.AccumulateCreditsFromVictim(ssn, victim, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims, committedEvictions)
 
 			if task.InitResreq.LessEqual(availableResources, api.Zero) {
 				taskCanBePipelined = true
@@ -368,11 +393,68 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		}
 
 		stmt.Merge(nodeStmt)
+		framework.MergeCredits(reclaimedByNode, totalReclaimed, creditedVictims, attemptReclaimedByNode, attemptTotalReclaimed, attemptCreditedVictims)
 		klog.V(3).Infof("Successfully pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
 			task.Namespace, task.Name, victimNode.Name, reclaimed)
 		return
 	}
 	klog.V(3).Infof("Failed to reclaim resources for Task <%s/%s> on any node.", task.Namespace, task.Name)
+}
+
+// pipelineWithReclaimCredits pipelines a task onto a node whose eviction credits
+// (freed earlier in this action by a committed reclaim) already cover the full
+// request, so no additional victim is evicted. It is gated by both the credit
+// pools and the node's FutureIdle to avoid over-placement.
+func (ra *Action) pipelineWithReclaimCredits(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	task *api.TaskInfo,
+	reclaimedByNode map[string]*api.Resource,
+	totalReclaimed *api.Resource,
+) bool {
+	if !task.InitResreq.LessEqual(totalReclaimed, api.Zero) {
+		return false
+	}
+
+	for _, nodeName := range framework.CreditNodeNames(reclaimedByNode) {
+		node, found := ssn.Nodes[nodeName]
+		if !found {
+			continue
+		}
+
+		if options.ServerOpts.ShardingMode == commonutil.HardShardingMode && !ssn.NodesInShard.Has(nodeName) {
+			continue
+		}
+
+		if !framework.HasSufficientCredits(task, nodeName, reclaimedByNode, totalReclaimed) {
+			continue
+		}
+
+		if !task.InitResreq.LessEqual(node.FutureIdle(), api.Zero) {
+			continue
+		}
+
+		if err := ssn.PredicateForPreemptAction(task, node); err != nil {
+			klog.V(5).Infof("Skip reclaim-credit pipeline for Task <%s/%s> on Node <%s>: predicate failed: %v.",
+				task.Namespace, task.Name, nodeName, err)
+			continue
+		}
+
+		nodeStmt := framework.NewStatement(ssn)
+		if err := nodeStmt.Pipeline(task, nodeName, true); err != nil {
+			klog.V(5).Infof("Failed reclaim-credit pipeline for Task <%s/%s> on Node <%s>: %v.",
+				task.Namespace, task.Name, nodeName, err)
+			nodeStmt.DiscardWithReason("reclaim-credit pipeline failed on node " + nodeName)
+			continue
+		}
+
+		framework.ConsumeCredits(task, nodeName, reclaimedByNode, totalReclaimed)
+		stmt.Merge(nodeStmt)
+		klog.V(3).Infof("Directly pipelined Task <%s/%s> on Node <%s> using reclaim credits.",
+			task.Namespace, task.Name, nodeName)
+		return true
+	}
+	return false
 }
 
 func (ra *Action) UnInitialize() {

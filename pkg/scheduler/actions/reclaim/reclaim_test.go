@@ -498,3 +498,166 @@ func TestReclaimIdleFastPathNoEviction(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReclaimPipelinesMPILauncherWithIdleResources(t *testing.T) {
+	const migResource = "nvidia.com/mig-3g.40gb"
+
+	victimLauncher := util.BuildPod("project-a", "victim-launcher", "n2", v1.PodRunning, api.BuildResourceList("100m", "200Mi"), "pg-victim-mpi", map[string]string{"app": "victim-mpi"}, make(map[string]string))
+	victimWorker := util.BuildPod("project-a", "victim-worker", "n1", v1.PodRunning, api.BuildResourceList("100m", "200Mi", []api.ScalarResource{{Name: migResource, Value: "1"}}...), "pg-victim-mpi", map[string]string{"app": "victim-mpi"}, make(map[string]string))
+	launcher := util.BuildPod("project-c", "mpi-launcher", "", v1.PodPending, api.BuildResourceList("100m", "200Mi"), "pg-mpi", map[string]string{"app": "mpi"}, make(map[string]string))
+	worker := util.BuildPod("project-c", "mpi-worker", "", v1.PodPending, api.BuildResourceList("100m", "200Mi", []api.ScalarResource{{Name: migResource, Value: "1"}}...), "pg-mpi", map[string]string{"app": "mpi"}, make(map[string]string))
+
+	for _, pod := range []*v1.Pod{victimLauncher, victimWorker} {
+		pod.Annotations[schedulingv1beta1.PodPreemptable] = "true"
+		pod.Annotations[framework.GroupEvictionPolicyAnnotationKey] = "minMember"
+	}
+	launcher.Annotations[api.TaskPriorityAnnotation] = "-1"
+	worker.Annotations[api.TaskPriorityAnnotation] = "10"
+
+	test := &uthelper.TestCommonStruct{
+		Name: "capacity MPI reclaim pipelines launcher from idle resources",
+		Plugins: map[string]framework.PluginBuilder{
+			capacity.PluginName:   capacity.New,
+			gang.PluginName:       gang.New,
+			predicates.PluginName: predicates.New,
+			priority.PluginName:   priority.New,
+		},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroup("pg-victim-mpi", "project-a", "project-a-preemptable", 2, nil, schedulingv1beta1.PodGroupRunning),
+			util.BuildPodGroup("pg-mpi", "project-c", "project-c-preemptable", 2, nil, schedulingv1beta1.PodGroupInqueue),
+		},
+		Pods: []*v1.Pod{
+			victimLauncher,
+			victimWorker,
+			launcher,
+			worker,
+		},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n1"}),
+			util.BuildNode("n2", api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n2"}),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			util.BuildQueueWithResourcesQuantity("project-a-preemptable", nil, api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...)),
+			util.BuildQueueWithResourcesQuantity("project-c-preemptable", api.BuildResourceList("", "", []api.ScalarResource{{Name: migResource, Value: "1"}}...), api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...)),
+		},
+		ExpectPipeLined: map[string][]string{
+			"project-c/pg-mpi": {"n1", "n2"},
+		},
+		ExpectTaskStatusNums: map[api.JobID]map[api.TaskStatus]int{
+			"project-c/pg-mpi": {
+				api.Pipelined: 2,
+			},
+		},
+		ExpectEvicted:  []string{"project-a/victim-launcher", "project-a/victim-worker"},
+		ExpectEvictNum: 2,
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:               capacity.PluginName,
+					EnabledAllocatable: &trueValue,
+					EnabledReclaimable: &trueValue,
+					EnablePreemptive:   &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:             priority.PluginName,
+					EnabledTaskOrder: &trueValue,
+				},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReclaimCreditsCarryAcrossCommittedJobs(t *testing.T) {
+	const migResource = "nvidia.com/mig-3g.40gb"
+
+	victim1 := util.BuildPod("project-a", "victim-worker-1", "n1", v1.PodRunning, api.BuildResourceList("100m", "200Mi", []api.ScalarResource{{Name: migResource, Value: "1"}}...), "pg-victim-mpi", map[string]string{"app": "victim-mpi"}, make(map[string]string))
+	victim2 := util.BuildPod("project-a", "victim-worker-2", "n2", v1.PodRunning, api.BuildResourceList("100m", "200Mi", []api.ScalarResource{{Name: migResource, Value: "1"}}...), "pg-victim-mpi", map[string]string{"app": "victim-mpi"}, make(map[string]string))
+	for _, pod := range []*v1.Pod{victim1, victim2} {
+		pod.Annotations[schedulingv1beta1.PodPreemptable] = "true"
+		pod.Annotations[framework.GroupEvictionPolicyAnnotationKey] = "minMember"
+	}
+
+	test := &uthelper.TestCommonStruct{
+		Name: "reclaim credits carry across committed jobs in action",
+		Plugins: map[string]framework.PluginBuilder{
+			capacity.PluginName:   capacity.New,
+			gang.PluginName:       gang.New,
+			predicates.PluginName: predicates.New,
+		},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroup("pg-victim-mpi", "project-a", "project-a-preemptable", 2, nil, schedulingv1beta1.PodGroupRunning),
+			util.BuildPodGroup("pg-reclaimer-1", "project-c", "project-c-preemptable", 1, nil, schedulingv1beta1.PodGroupInqueue),
+			util.BuildPodGroup("pg-reclaimer-2", "project-c", "project-c-preemptable", 1, nil, schedulingv1beta1.PodGroupInqueue),
+		},
+		Pods: []*v1.Pod{
+			victim1,
+			victim2,
+			util.BuildPod("project-c", "reclaimer-worker-1", "", v1.PodPending, api.BuildResourceList("100m", "200Mi", []api.ScalarResource{{Name: migResource, Value: "1"}}...), "pg-reclaimer-1", map[string]string{"app": "mpi"}, make(map[string]string)),
+			util.BuildPod("project-c", "reclaimer-worker-2", "", v1.PodPending, api.BuildResourceList("100m", "200Mi", []api.ScalarResource{{Name: migResource, Value: "1"}}...), "pg-reclaimer-2", map[string]string{"app": "mpi"}, make(map[string]string)),
+		},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n1"}),
+			util.BuildNode("n2", api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n2"}),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			util.BuildQueueWithResourcesQuantity("project-a-preemptable", nil, api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "2"}, {Name: "pods", Value: "10"}}...)),
+			util.BuildQueueWithResourcesQuantity("project-c-preemptable", api.BuildResourceList("", "", []api.ScalarResource{{Name: migResource, Value: "2"}}...), api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "2"}, {Name: "pods", Value: "10"}}...)),
+		},
+		ExpectPipeLined: map[string][]string{
+			"project-c/pg-reclaimer-1": {"n1", "n2"},
+			"project-c/pg-reclaimer-2": {"n1", "n2"},
+		},
+		ExpectEvicted:  []string{"project-a/victim-worker-1", "project-a/victim-worker-2"},
+		ExpectEvictNum: 2,
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:               capacity.PluginName,
+					EnabledAllocatable: &trueValue,
+					EnabledReclaimable: &trueValue,
+					EnablePreemptive:   &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}

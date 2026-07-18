@@ -162,6 +162,16 @@ type Session struct {
 	cycleStatesMap sync.Map
 
 	NodesInShard sets.Set[string]
+
+	// EvictionCreditsByNode tracks resources freed by committed evictions in this
+	// scheduling cycle, keyed by node name, so later tasks and actions can reuse
+	// them without triggering additional evictions.
+	EvictionCreditsByNode map[string]*api.Resource
+	// TotalEvictionCredits is the cycle-wide sum of EvictionCreditsByNode.
+	TotalEvictionCredits *api.Resource
+	// CreditedEvictions is the set of evicted task UIDs already counted, to
+	// prevent double counting.
+	CreditedEvictions map[api.TaskID]struct{}
 }
 
 func openSession(cache cache.Cache) *Session {
@@ -186,6 +196,10 @@ func openSession(cache cache.Cache) *Session {
 		CSINodesStatus: map[string]*api.CSINodeStatusInfo{},
 		RevocableNodes: map[string]*api.NodeInfo{},
 		Queues:         map[api.QueueID]*api.QueueInfo{},
+
+		EvictionCreditsByNode: map[string]*api.Resource{},
+		TotalEvictionCredits:  api.EmptyResource(),
+		CreditedEvictions:     map[api.TaskID]struct{}{},
 
 		plugins:                       map[string]Plugin{},
 		jobOrderFns:                   map[string]api.CompareFn{},

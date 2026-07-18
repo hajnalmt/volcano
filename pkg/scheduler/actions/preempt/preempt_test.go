@@ -999,6 +999,116 @@ func TestPreemptGroupEvictionPolicyCreditsAcrossNodes(t *testing.T) {
 	}
 }
 
+// TestPreemptLauncherOnScalarQueueViaNormalPreempt is the unit analog of the
+// preempt-mpi-on-mpi e2e. On a queue that meters only the MIG scalar, a
+// high-priority MPI gang (a MIG worker plus a CPU/memory-only launcher) preempts
+// a same-spec low-priority gang. The launcher requests nothing the queue meters,
+// so ssn.Allocatable is true for it and normalPreempt pipelines it without an
+// idle fast path. This guards the decision to drop pipelineWithIdleResources from
+// preempt: if capacity's CPU/memory defaulting or the Allocatable gate regresses,
+// the launcher would no longer be placed and this test fails.
+func TestPreemptLauncherOnScalarQueueViaNormalPreempt(t *testing.T) {
+	const migResource = "nvidia.com/mig-3g.40gb"
+
+	highPrio := util.BuildPriorityClass("high-priority", 100000)
+	lowPrio := util.BuildPriorityClass("low-priority", 10)
+
+	launcherLow := util.BuildPod("c1", "launcher-low", "n1", v1.PodRunning,
+		api.BuildResourceList("1", "1Gi"),
+		"pg-low", map[string]string{"app": "mpi"}, make(map[string]string))
+	workerLow := util.BuildPod("c1", "worker-low", "n1", v1.PodRunning,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-low", map[string]string{"app": "mpi"}, make(map[string]string))
+	for _, pod := range []*v1.Pod{launcherLow, workerLow} {
+		pod.Annotations[schedulingv1beta1.PodPreemptable] = "true"
+		pod.Annotations[framework.GroupEvictionPolicyAnnotationKey] = "minMember"
+	}
+
+	launcherHigh := util.BuildPod("c1", "launcher-high", "", v1.PodPending,
+		api.BuildResourceList("1", "1Gi"),
+		"pg-high", map[string]string{"app": "mpi"}, make(map[string]string))
+	workerHigh := util.BuildPod("c1", "worker-high", "", v1.PodPending,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-high", map[string]string{"app": "mpi"}, make(map[string]string))
+
+	test := &uthelper.TestCommonStruct{
+		Name: "preempt places CPU/memory launcher on scalar-only queue via normalPreempt",
+		Plugins: map[string]framework.PluginBuilder{
+			capacity.PluginName:    capacity.New,
+			conformance.PluginName: conformance.New,
+			gang.PluginName:        gang.New,
+			priority.PluginName:    priority.New,
+			predicates.PluginName:  predicates.New,
+		},
+		PriClass: []*schedulingv1.PriorityClass{highPrio, lowPrio},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroupWithPrio("pg-low", "c1", "q1", 2, nil, schedulingv1beta1.PodGroupRunning, "low-priority"),
+			util.BuildPodGroupWithPrio("pg-high", "c1", "q1", 2, nil, schedulingv1beta1.PodGroupInqueue, "high-priority"),
+		},
+		Pods: []*v1.Pod{launcherLow, workerLow, launcherHigh, workerHigh},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "20"}}...), map[string]string{v1.LabelHostname: "n1"}),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			util.BuildQueueWithResourcesQuantity("q1",
+				api.BuildResourceList("", "", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+				api.BuildResourceList("", "", []api.ScalarResource{{Name: migResource, Value: "1"}}...)),
+		},
+		ExpectEvicted:  []string{"c1/worker-low", "c1/launcher-low"},
+		ExpectEvictNum: 2,
+		ExpectPipeLined: map[string][]string{
+			"c1/pg-high": {"n1"},
+		},
+		ExpectTaskStatusNums: map[api.JobID]map[api.TaskStatus]int{
+			"c1/pg-high": {
+				api.Pipelined: 2,
+			},
+		},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:               conformance.PluginName,
+					EnabledPreemptable: &trueValue,
+				},
+				{
+					Name:                gang.PluginName,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:                priority.PluginName,
+					EnabledTaskOrder:    &trueValue,
+					EnabledJobOrder:     &trueValue,
+					EnabledPreemptable:  &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:               capacity.PluginName,
+					EnabledAllocatable: &trueValue,
+					EnabledQueueOrder:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, []conf.Configuration{{Name: New().Name(),
+		Arguments: map[string]interface{}{EnableTopologyAwarePreemptionKey: false}}})
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func buildPodWithPodAntiAffinity(name, namespace, node string, phase v1.PodPhase, req v1.ResourceList, groupName string, labels map[string]string, selector map[string]string, topologyKey string) *v1.Pod {
 	pod := util.BuildPod(name, namespace, node, phase, req, groupName, labels, selector)
 
