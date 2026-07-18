@@ -146,13 +146,17 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				if !ssn.Preemptive(queue, []*api.TaskInfo{task}) {
-					klog.V(3).Infof("Queue <%s> cannot reclaim for task <%s>, skip", queue.Name, task.Name)
+				if err := ssn.PrePredicateFn(task); err != nil {
+					klog.V(3).Infof("PrePredicate failed for task %s/%s: %v", task.Namespace, task.Name, err)
 					continue
 				}
 
-				if err := ssn.PrePredicateFn(task); err != nil {
-					klog.V(3).Infof("PrePredicate failed for task %s/%s: %v", task.Namespace, task.Name, err)
+				if ra.pipelineWithIdleResources(ssn, stmt, queue, task) {
+					continue
+				}
+
+				if !ssn.Preemptive(queue, []*api.TaskInfo{task}) {
+					klog.V(3).Infof("Queue <%s> cannot reclaim for task <%s>, skip", queue.Name, task.Name)
 					continue
 				}
 
@@ -172,6 +176,74 @@ func (ra *Action) Execute(ssn *framework.Session) {
 	}
 }
 
+// nodeVictimsInfo holds the reclaim information for a single node.
+type nodeVictimsInfo struct {
+	node               *api.NodeInfo
+	victims            *util.PriorityQueue
+	reclaimed          *api.Resource
+	availableResources *api.Resource
+}
+
+// pipelineWithIdleResources pipelines a task onto a node with enough idle
+// resources without reclaiming anything. This covers tasks the queue does not
+// meter (e.g. a CPU/memory-only MPI launcher on a scalar-only queue), which the
+// reclaim eligibility check (ssn.Preemptive) would otherwise skip.
+func (ra *Action) pipelineWithIdleResources(
+	ssn *framework.Session,
+	stmt *framework.Statement,
+	queue *api.QueueInfo,
+	task *api.TaskInfo,
+) bool {
+	if !ssn.Allocatable(queue, task) {
+		klog.V(5).Infof("Skip idle pipeline for Task <%s/%s> in Queue <%s>: queue is not allocatable for request <%v>.",
+			task.Namespace, task.Name, queue.Name, task.InitResreq)
+		return false
+	}
+
+	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
+	predicateHelper := util.NewPredicateHelper()
+	predicateNodes, _ := predicateHelper.PredicateNodes(task, totalNodes, ssn.PredicateForPreemptAction, ra.enablePredicateErrorCache, ssn.NodesInShard)
+	predicateNodesByShard := util.GetPredicatedNodeByShard(predicateNodes, ssn.NodesInShard)
+	var idleCandidateNodes []*api.NodeInfo
+	for _, nodes := range predicateNodesByShard {
+		for _, node := range nodes {
+			if !task.InitResreq.LessEqual(node.Idle, api.Zero) {
+				continue
+			}
+			idleCandidateNodes = append(idleCandidateNodes, node)
+		}
+	}
+
+	if len(idleCandidateNodes) == 0 {
+		return false
+	}
+
+	bestNode := idleCandidateNodes[0]
+	if len(idleCandidateNodes) > 1 {
+		nodeScores := util.PrioritizeNodes(task, idleCandidateNodes, ssn.BatchNodeOrderFn, ssn.NodeOrderMapFn, ssn.NodeOrderReduceFn)
+		bestNode = ssn.BestNodeFn(task, nodeScores)
+		if bestNode == nil {
+			bestNode, _ = util.SelectBestNodeAndScore(nodeScores)
+		}
+	}
+	if bestNode == nil {
+		return false
+	}
+
+	nodeStmt := framework.NewStatement(ssn)
+	if err := nodeStmt.Pipeline(task, bestNode.Name, false); err != nil {
+		klog.V(5).Infof("Failed idle pipeline for Task <%s/%s> on Node <%s>: %v.",
+			task.Namespace, task.Name, bestNode.Name, err)
+		nodeStmt.DiscardWithReason("idle pipeline failed on node " + bestNode.Name)
+		return false
+	}
+
+	stmt.Merge(nodeStmt)
+	klog.V(3).Infof("Pipelined Task <%s/%s> on Node <%s> using idle resources <%v> without reclaim.",
+		task.Namespace, task.Name, bestNode.Name, bestNode.Idle)
+	return true
+}
+
 func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Statement, task *api.TaskInfo, job *api.JobInfo) {
 	totalNodes := ssn.FilterOutUnschedulableAndUnresolvableNodesForTask(task)
 	predicateHelper := util.NewPredicateHelper()
@@ -181,6 +253,11 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 	for _, nodes := range predicateNodesByShard {
 		predicateNodesByShardFlattened = append(predicateNodesByShardFlattened, nodes...)
 	}
+
+	allVictims := ssn.BuildAumovioVictimPriorityQueue(nil, task)
+	victimToNode := make(map[api.TaskID]*api.NodeInfo)
+	nodeVictimsMap := make(map[string]*nodeVictimsInfo)
+
 	for _, n := range predicateNodesByShardFlattened {
 		klog.V(3).Infof("Considering Task <%s/%s> on Node <%s>.", task.Namespace, task.Name, n.Name)
 
@@ -212,47 +289,90 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 			continue
 		}
 
-		victimsQueue := ssn.BuildVictimsPriorityQueue(victims, task)
-		resreq := task.InitResreq.Clone()
-		reclaimed := api.EmptyResource()
+		nodeVictimsMap[n.Name] = &nodeVictimsInfo{
+			node:               n,
+			victims:            ssn.BuildAumovioVictimPriorityQueue(victims, task),
+			reclaimed:          api.EmptyResource(),
+			availableResources: n.FutureIdle().Clone(),
+		}
+		for _, victim := range victims {
+			allVictims.Push(victim)
+			victimToNode[victim.UID] = n
+		}
+	}
 
-		// The reclaimed resources should be added to the remaining available resources of the nodes to avoid over-reclaiming.
-		availableResources := n.FutureIdle()
+	if allVictims.Empty() {
+		klog.V(3).Infof("No victims found for Task <%s/%s>.", task.Namespace, task.Name)
+		return
+	}
 
-		// Use a per-node statement so that evictions are isolated to this node.
-		// Only merge into the caller's stmt if Pipeline succeeds; otherwise discard
-		// so victims on nodes that end up unused are never committed to Kubernetes.
+	// The highest-priority victim (Aumovio ordering) elects which node to attempt
+	// first; this drives cross-queue victim selection by queue level.
+	triedNodes := make(map[string]bool)
+	for !allVictims.Empty() {
+		initiatorVictim := allVictims.Pop().(*api.TaskInfo)
+		victimNode := victimToNode[initiatorVictim.UID]
+		if triedNodes[victimNode.Name] {
+			continue
+		}
+		triedNodes[victimNode.Name] = true
+
 		nodeStmt := framework.NewStatement(ssn)
+		nodeInfo := nodeVictimsMap[victimNode.Name]
+		nodeVictimsQueue := nodeInfo.victims.Clone()
+		reclaimed := nodeInfo.reclaimed.Clone()
+		availableResources := nodeInfo.availableResources.Clone()
+		evictionFailed := false
 		evictionOccurred := false
-		for !victimsQueue.Empty() {
-			if resreq.LessEqual(availableResources, api.Zero) {
+		taskCanBePipelined := false
+
+		for !nodeVictimsQueue.Empty() {
+			victim := nodeVictimsQueue.Pop().(*api.TaskInfo)
+			klog.V(3).Infof("Try to reclaim Task <%s/%s> for Tasks <%s/%s> on Node <%s>",
+				victim.Namespace, victim.Name, task.Namespace, task.Name, victimNode.Name)
+
+			if err := nodeStmt.Evict(victim, "reclaim"); err != nil {
+				klog.Errorf("Failed to reclaim Task <%s/%s> for Task <%s/%s> on Node <%s>: %v",
+					victim.Namespace, victim.Name, task.Namespace, task.Name, victimNode.Name, err)
+				evictionFailed = true
 				break
 			}
-			reclaimee := victimsQueue.Pop().(*api.TaskInfo)
-			klog.V(3).Infof("Try to reclaim Task <%s/%s> for Tasks <%s/%s>",
-				reclaimee.Namespace, reclaimee.Name, task.Namespace, task.Name)
-			nodeStmt.Evict(reclaimee, "reclaim")
-			reclaimed.Add(reclaimee.Resreq)
-			availableResources.Add(reclaimee.Resreq)
+
+			reclaimed.Add(victim.Resreq)
+			availableResources.Add(victim.Resreq)
 			evictionOccurred = true
+
+			if task.InitResreq.LessEqual(availableResources, api.Zero) {
+				taskCanBePipelined = true
+				break
+			}
 		}
 
-		klog.V(3).Infof("Reclaimed <%v> for task <%s/%s> requested <%v>, and Node <%s> availableResources <%v>.", reclaimed, task.Namespace, task.Name, task.InitResreq, n.Name, availableResources)
-
-		if !resreq.LessEqual(availableResources, api.Zero) {
-			nodeStmt.Discard()
+		if evictionFailed {
+			nodeStmt.DiscardWithReason("eviction failed on node " + victimNode.Name)
 			continue
 		}
 
-		if err := nodeStmt.Pipeline(task, n.Name, evictionOccurred); err != nil {
-			klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>",
-				task.Namespace, task.Name, n.Name)
-			nodeStmt.Discard()
+		if !taskCanBePipelined {
+			klog.V(3).Infof("Not enough resources on Node <%s> after reclaiming (reclaimed: %v, available: %v, required: %v).",
+				victimNode.Name, reclaimed, availableResources, task.InitResreq)
+			nodeStmt.DiscardWithReason("insufficient resources on node " + victimNode.Name)
 			continue
 		}
+
+		if err := nodeStmt.Pipeline(task, victimNode.Name, evictionOccurred); err != nil {
+			klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>: %v",
+				task.Namespace, task.Name, victimNode.Name, err)
+			nodeStmt.DiscardWithReason("pipeline failed on node " + victimNode.Name)
+			continue
+		}
+
 		stmt.Merge(nodeStmt)
-		break
+		klog.V(3).Infof("Successfully pipelined Task <%s/%s> on Node <%s>, reclaimed: <%v>.",
+			task.Namespace, task.Name, victimNode.Name, reclaimed)
+		return
 	}
+	klog.V(3).Infof("Failed to reclaim resources for Task <%s/%s> on any node.", task.Namespace, task.Name)
 }
 
 func (ra *Action) UnInitialize() {

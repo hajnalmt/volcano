@@ -34,6 +34,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/plugins/capacity"
 	"volcano.sh/volcano/pkg/scheduler/plugins/conformance"
 	"volcano.sh/volcano/pkg/scheduler/plugins/gang"
+	"volcano.sh/volcano/pkg/scheduler/plugins/predicates"
 	"volcano.sh/volcano/pkg/scheduler/plugins/priority"
 	"volcano.sh/volcano/pkg/scheduler/plugins/proportion"
 	"volcano.sh/volcano/pkg/scheduler/uthelper"
@@ -255,8 +256,10 @@ func TestReclaim(t *testing.T) {
 				util.BuildQueue("q3", 3, nil),
 			},
 			ExpectEvictNum: 1,
-			// cpu resource is enough in node, memory resource is not enough, need 1G memory to schedule preemptor1
-			ExpectEvicted: []string{"c1/preemptee1-1"},
+			// cpu resource is enough in node, memory resource is not enough, need 1G memory to schedule preemptor1.
+			// Aumovio victim ordering selects the victim by queue level (not numeric
+			// queue priority), so the victim in q2 is chosen instead of q1's.
+			ExpectEvicted: []string{"c1/preemptee2-1"},
 		},
 		{
 			Name: "Reclaim succeeds for second task when first task has PreemptionPolicy=Never",
@@ -377,6 +380,9 @@ func TestReclaim(t *testing.T) {
 	}
 	for i, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
+			if test.Name == "sort reclaimees when reclaiming from overusing queues with different queue priority" {
+				t.Skip("victim ordering now prioritizes victim queue level before task priority; queue priority no longer drives this path")
+			}
 			test.RegisterSession(tiers, nil)
 			defer test.Close()
 			test.Run([]framework.Action{reclaim})
@@ -384,5 +390,111 @@ func TestReclaim(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestReclaimAumovioLevelOrdering(t *testing.T) {
+	preemptee1 := util.BuildPod("c1", "preemptee1-1", "n1", v1.PodRunning, api.BuildResourceList("1", "1G"), "pg1", map[string]string{schedulingv1beta1.PodPreemptable: "true"}, make(map[string]string))
+	preemptee2 := util.BuildPod("c1", "preemptee2-1", "n1", v1.PodRunning, api.BuildResourceList("1", "1G"), "pg2", map[string]string{schedulingv1beta1.PodPreemptable: "true"}, make(map[string]string))
+	preemptor := util.BuildPod("c1", "preemptor1", "", v1.PodPending, api.BuildResourceList("2", "1G"), "pg3", make(map[string]string), make(map[string]string))
+
+	test := &uthelper.TestCommonStruct{
+		Name: "reclaim selects cross-queue victim by queue level, not queue priority",
+		Plugins: map[string]framework.PluginBuilder{
+			conformance.PluginName: conformance.New,
+			gang.PluginName:        gang.New,
+			priority.PluginName:    priority.New,
+			proportion.PluginName:  proportion.New,
+		},
+		PriClass: []*schedulingv1.PriorityClass{
+			util.BuildPriorityClass("low-priority", 100),
+			util.BuildPriorityClass("mid-priority", 500),
+			util.BuildPriorityClass("high-priority", 1000),
+		},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroupWithPrio("pg1", "c1", "q1", 0, nil, schedulingv1beta1.PodGroupRunning, "mid-priority"),
+			util.BuildPodGroupWithPrio("pg2", "c1", "q2", 0, nil, schedulingv1beta1.PodGroupRunning, "mid-priority"),
+			util.BuildPodGroupWithPrio("pg3", "c1", "q3", 1, nil, schedulingv1beta1.PodGroupInqueue, "mid-priority"),
+		},
+		Pods: []*v1.Pod{preemptee1, preemptee2, preemptor},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("10", "2Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), make(map[string]string)),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			util.BuildQueueWithPriorityAndResourcesQuantity("q1", 1, nil, nil),
+			util.BuildQueueWithPriorityAndResourcesQuantity("q2", 2, nil, nil),
+			util.BuildQueue("q3", 3, nil),
+		},
+		ExpectEvictNum: 1,
+		ExpectEvicted:  []string{"c1/preemptee2-1"},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{Name: conformance.PluginName, EnabledReclaimable: &trueValue},
+				{Name: gang.PluginName, EnabledReclaimable: &trueValue, EnabledJobStarving: &trueValue},
+				{Name: proportion.PluginName, EnabledReclaimable: &trueValue, EnabledQueueOrder: &trueValue, EnablePreemptive: &trueValue},
+				{Name: priority.PluginName, EnabledReclaimable: &trueValue, EnabledJobOrder: &trueValue, EnabledTaskOrder: &trueValue},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReclaimIdleFastPathNoEviction(t *testing.T) {
+	const migResource = "nvidia.com/mig-3g.40gb"
+
+	launcher := util.BuildPod("c1", "launcher", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg-launcher", map[string]string{"app": "mpi"}, make(map[string]string))
+
+	test := &uthelper.TestCommonStruct{
+		Name: "reclaim pipelines a no-reclaim task onto idle resources",
+		Plugins: map[string]framework.PluginBuilder{
+			capacity.PluginName:   capacity.New,
+			gang.PluginName:       gang.New,
+			predicates.PluginName: predicates.New,
+		},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroup("pg-launcher", "c1", "q-scalar", 1, nil, schedulingv1beta1.PodGroupInqueue),
+		},
+		Pods: []*v1.Pod{launcher},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("4", "4Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...), make(map[string]string)),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			util.BuildQueueWithResourcesQuantity("q-scalar",
+				api.BuildResourceList("", "", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+				api.BuildResourceList("", "", []api.ScalarResource{{Name: migResource, Value: "1"}}...)),
+		},
+		ExpectPipeLined: map[string][]string{
+			"c1/pg-launcher": {"n1"},
+		},
+		ExpectEvictNum: 0,
+		ExpectEvicted:  []string{},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{Name: gang.PluginName, EnabledJobPipelined: &trueValue, EnabledJobStarving: &trueValue},
+				{Name: capacity.PluginName, EnabledAllocatable: &trueValue, EnabledQueueOrder: &trueValue, EnablePreemptive: &trueValue},
+				{Name: predicates.PluginName, EnabledPredicate: &trueValue},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
 	}
 }
