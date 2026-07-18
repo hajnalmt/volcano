@@ -746,6 +746,259 @@ func TestTopologyAwarePreempt(t *testing.T) {
 	}
 }
 
+// TestPreemptCreditFastPathReusesFreedResources verifies the session-level
+// eviction credit flow added for preempt in #9. A single low-priority victim
+// holds both MIG slices on the node. A high-priority gang (minMember 2) needs
+// one MIG slice per worker. Evicting the single victim frees two MIG slices, so
+// the first worker is pipelined via a normal eviction (which accumulates the
+// freed resources as session-level eviction credits) and the second worker is
+// pipelined via the credit fast path (pipelineWithEvictionCredits) without a
+// second eviction.
+//
+// The queue is capped at a single MIG slice on purpose: after the first worker
+// is pipelined the queue is over its MIG capability, so ssn.Allocatable is false
+// for the second worker and normalPreempt cannot place it via its FutureIdle
+// path (that path is gated on Allocatable). Only the credit fast path, which
+// bypasses Allocatable because the eviction is already committed, can pipeline
+// the second worker. This isolates the credit flow: disabling
+// pipelineWithEvictionCredits leaves the gang with a single pipelined worker and
+// fails the Pipelined==2 expectation.
+func TestPreemptCreditFastPathReusesFreedResources(t *testing.T) {
+	const migResource = "nvidia.com/mig-3g.40gb"
+
+	highPrio := util.BuildPriorityClass("high-priority", 100000)
+	lowPrio := util.BuildPriorityClass("low-priority", 10)
+
+	// One low-priority victim holds both MIG slices on n1.
+	victim := util.BuildPod("c1", "victim-big", "n1", v1.PodRunning,
+		api.BuildResourceList("2", "2Gi", []api.ScalarResource{{Name: migResource, Value: "2"}}...),
+		"pg-victim", map[string]string{"app": "victim"}, make(map[string]string))
+	victim.Annotations[schedulingv1beta1.PodPreemptable] = "true"
+
+	// A high-priority gang (minMember 2); each worker needs one MIG slice.
+	worker1 := util.BuildPod("c1", "worker-1", "", v1.PodPending,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-preemptor", map[string]string{"app": "mpi"}, make(map[string]string))
+	worker2 := util.BuildPod("c1", "worker-2", "", v1.PodPending,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-preemptor", map[string]string{"app": "mpi"}, make(map[string]string))
+
+	test := &uthelper.TestCommonStruct{
+		Name: "preempt reuses freed resources via eviction credits",
+		Plugins: map[string]framework.PluginBuilder{
+			capacity.PluginName:    capacity.New,
+			conformance.PluginName: conformance.New,
+			gang.PluginName:        gang.New,
+			priority.PluginName:    priority.New,
+			predicates.PluginName:  predicates.New,
+		},
+		PriClass: []*schedulingv1.PriorityClass{highPrio, lowPrio},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroupWithPrio("pg-victim", "c1", "q1", 1, nil, schedulingv1beta1.PodGroupRunning, "low-priority"),
+			util.BuildPodGroupWithPrio("pg-preemptor", "c1", "q1", 2, nil, schedulingv1beta1.PodGroupInqueue, "high-priority"),
+		},
+		Pods: []*v1.Pod{victim, worker1, worker2},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: migResource, Value: "2"}, {Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n1"}),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			// Capability grants a single MIG slice, keeping the queue over
+			// capacity for the second worker so only the credit fast path applies.
+			util.BuildQueueWithResourcesQuantity("q1",
+				api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...),
+				api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...)),
+		},
+		// Only one eviction happens; the freed MIG slices cover both workers.
+		ExpectEvicted:  []string{"c1/victim-big"},
+		ExpectEvictNum: 1,
+		ExpectPipeLined: map[string][]string{
+			"c1/pg-preemptor": {"n1"},
+		},
+		ExpectTaskStatusNums: map[api.JobID]map[api.TaskStatus]int{
+			"c1/pg-preemptor": {
+				api.Pipelined: 2,
+			},
+		},
+	}
+
+	trueValue := true
+	// gang is enabled only for pipelined/starving of the preemptor gang, not for
+	// Preemptable, so it does not veto evicting the lone minMember-1 victim.
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:               conformance.PluginName,
+					EnabledPreemptable: &trueValue,
+				},
+				{
+					Name:                gang.PluginName,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:                priority.PluginName,
+					EnabledTaskOrder:    &trueValue,
+					EnabledJobOrder:     &trueValue,
+					EnabledPreemptable:  &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:               capacity.PluginName,
+					EnabledAllocatable: &trueValue,
+					EnabledQueueOrder:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, []conf.Configuration{{Name: New().Name(),
+		Arguments: map[string]interface{}{EnableTopologyAwarePreemptionKey: false}}})
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPreemptGroupEvictionPolicyCreditsAcrossNodes is the preempt analog of the
+// reclaim MPI test (TestReclaimPipelinesMPILauncherWithIdleResources). It shows
+// that preempt does NOT account for resources freed by the
+// volcano.sh/group-eviction-policy=minMember cascade, whereas reclaim does.
+//
+// Setup: a low-priority victim gang (minMember 2) holds one MIG slice on each of
+// two nodes; both victim pods carry group-eviction-policy=minMember. A
+// high-priority gang (minMember 2) needs one MIG slice per worker. The queue is
+// capped at a single MIG slice so that, after the first worker is pipelined, the
+// queue is over capacity (ssn.Allocatable is false) for the second worker.
+//
+// Expected correct behaviour: evicting victim-1 on n1 for worker-1 cascades to
+// evict victim-2 on n2, freeing a MIG slice there. worker-2 (not allocatable, and
+// unable to re-evict the already-Releasing victim-2) can then only be pipelined
+// on n2 via the credit fast path, using credit that must be recorded for n2 from
+// the cascade. Both workers pipeline, exactly one direct eviction plus one
+// cascade eviction occur (ExpectEvictNum 2).
+//
+// Actual behaviour today: preempt credits only the on-node victim it selected
+// (victim-1 on n1) and never records the cascade-freed victim-2 on n2, so worker-2
+// cannot be pipelined, the gang rolls back, and the test fails. This test is
+// expected to FAIL until preempt shares reclaim's group-eviction-policy aware
+// credit accounting.
+func TestPreemptGroupEvictionPolicyCreditsAcrossNodes(t *testing.T) {
+	const migResource = "nvidia.com/mig-3g.40gb"
+
+	highPrio := util.BuildPriorityClass("high-priority", 100000)
+	lowPrio := util.BuildPriorityClass("low-priority", 10)
+
+	// Low-priority victim gang: one MIG slice on each node, group-evicted together.
+	victim1 := util.BuildPod("c1", "victim-1", "n1", v1.PodRunning,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-victim", map[string]string{"app": "victim"}, make(map[string]string))
+	victim2 := util.BuildPod("c1", "victim-2", "n2", v1.PodRunning,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-victim", map[string]string{"app": "victim"}, make(map[string]string))
+	for _, pod := range []*v1.Pod{victim1, victim2} {
+		pod.Annotations[schedulingv1beta1.PodPreemptable] = "true"
+		pod.Annotations[framework.GroupEvictionPolicyAnnotationKey] = "minMember"
+	}
+
+	// High-priority gang (minMember 2); each worker needs one MIG slice.
+	worker1 := util.BuildPod("c1", "worker-1", "", v1.PodPending,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-preemptor", map[string]string{"app": "mpi"}, make(map[string]string))
+	worker2 := util.BuildPod("c1", "worker-2", "", v1.PodPending,
+		api.BuildResourceList("1", "1Gi", []api.ScalarResource{{Name: migResource, Value: "1"}}...),
+		"pg-preemptor", map[string]string{"app": "mpi"}, make(map[string]string))
+
+	test := &uthelper.TestCommonStruct{
+		Name: "preempt reuses group-eviction cascade resources via credits",
+		Plugins: map[string]framework.PluginBuilder{
+			capacity.PluginName:    capacity.New,
+			conformance.PluginName: conformance.New,
+			gang.PluginName:        gang.New,
+			priority.PluginName:    priority.New,
+			predicates.PluginName:  predicates.New,
+		},
+		PriClass: []*schedulingv1.PriorityClass{highPrio, lowPrio},
+		PodGroups: []*schedulingv1beta1.PodGroup{
+			util.BuildPodGroupWithPrio("pg-victim", "c1", "q1", 2, nil, schedulingv1beta1.PodGroupRunning, "low-priority"),
+			util.BuildPodGroupWithPrio("pg-preemptor", "c1", "q1", 2, nil, schedulingv1beta1.PodGroupInqueue, "high-priority"),
+		},
+		Pods: []*v1.Pod{victim1, victim2, worker1, worker2},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n1"}),
+			util.BuildNode("n2", api.BuildResourceList("8", "8Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "10"}}...), map[string]string{v1.LabelHostname: "n2"}),
+		},
+		Queues: []*schedulingv1beta1.Queue{
+			// Capability grants a single MIG slice, keeping the queue over
+			// capacity for the second worker so only the credit fast path applies.
+			util.BuildQueueWithResourcesQuantity("q1",
+				api.BuildResourceList("16", "16Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "20"}}...),
+				api.BuildResourceList("16", "16Gi", []api.ScalarResource{{Name: migResource, Value: "1"}, {Name: "pods", Value: "20"}}...)),
+		},
+		// One direct eviction (victim-1) plus one cascade eviction (victim-2).
+		ExpectEvicted:  []string{"c1/victim-1", "c1/victim-2"},
+		ExpectEvictNum: 2,
+		ExpectPipeLined: map[string][]string{
+			"c1/pg-preemptor": {"n1", "n2"},
+		},
+		ExpectTaskStatusNums: map[api.JobID]map[api.TaskStatus]int{
+			"c1/pg-preemptor": {
+				api.Pipelined: 2,
+			},
+		},
+	}
+
+	trueValue := true
+	// gang is enabled only for pipelined/starving of the preemptor gang, not for
+	// Preemptable, so it does not veto evicting the victim gang.
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:               conformance.PluginName,
+					EnabledPreemptable: &trueValue,
+				},
+				{
+					Name:                gang.PluginName,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:                priority.PluginName,
+					EnabledTaskOrder:    &trueValue,
+					EnabledJobOrder:     &trueValue,
+					EnabledPreemptable:  &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:               capacity.PluginName,
+					EnabledAllocatable: &trueValue,
+					EnabledQueueOrder:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+			},
+		},
+	}
+
+	test.RegisterSession(tiers, []conf.Configuration{{Name: New().Name(),
+		Arguments: map[string]interface{}{EnableTopologyAwarePreemptionKey: false}}})
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func buildPodWithPodAntiAffinity(name, namespace, node string, phase v1.PodPhase, req v1.ResourceList, groupName string, labels map[string]string, selector map[string]string, topologyKey string) *v1.Pod {
 	pod := util.BuildPod(name, namespace, node, phase, req, groupName, labels, selector)
 
